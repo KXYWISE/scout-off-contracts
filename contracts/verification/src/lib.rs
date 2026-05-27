@@ -118,6 +118,9 @@ impl VerificationContract {
     /// on the registered progress contract so both state changes happen atomically
     /// in the same Stellar transaction.
     ///
+    /// Each milestone records the Stellar ledger sequence number for
+    /// tamper-proof auditability.
+    ///
     /// Returns the milestone index for this player.
     pub fn approve_milestone(
         env: Env,
@@ -155,6 +158,7 @@ impl VerificationContract {
             description,
             evidence_hash,
             approved_at: env.ledger().timestamp(),
+            ledger_sequence: env.ledger().sequence(),
         };
 
         env.storage()
@@ -277,6 +281,12 @@ mod tests {
     }
 
     #[test]
+    fn test_health_false_before_initialize() {
+        let (_env, client) = setup();
+        assert!(!client.health());
+    }
+
+    #[test]
     fn test_register_and_approve() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -296,6 +306,9 @@ mod tests {
         );
         assert_eq!(idx, 1);
         assert_eq!(client.get_milestone_count(&1u64), 1);
+
+        let milestone = client.get_milestone(&1u64, &1);
+        assert!(milestone.ledger_sequence > 0);
     }
 
     #[test]
@@ -368,6 +381,27 @@ mod tests {
         // Should panic — not in validator registry
         client.approve_milestone(
             &random,
+            &1u64,
+            &String::from_str(&env, "Some milestone"),
+            &String::from_str(&env, "QmEvidence"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_approve_milestone_blocked_when_paused() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        client.pause_contract();
+
+        // Should panic — contract is paused
+        client.approve_milestone(
+            &validator,
             &1u64,
             &String::from_str(&env, "Some milestone"),
             &String::from_str(&env, "QmEvidence"),
