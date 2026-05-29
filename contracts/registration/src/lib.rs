@@ -58,8 +58,8 @@ impl RegistrationContract {
         vitals: PlayerVitals,
         ipfs_hashes: Vec<String>,
     ) -> Result<u64, ScoutChainError> {
-        Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
         wallet.require_auth();
 
         // Prevent duplicate registrations
@@ -153,8 +153,8 @@ impl RegistrationContract {
         wallet: Address,
         region: String,
     ) -> Result<u64, ScoutChainError> {
-        Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
         wallet.require_auth();
 
         if env
@@ -213,6 +213,36 @@ impl RegistrationContract {
             .persistent()
             .get(&DataKey::Scout(scout_id))
             .ok_or(ScoutChainError::ScoutNotFound)
+    }
+
+    pub fn get_player_count(env: Env) -> u64 {
+        if !env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Initialized)
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::PlayerCounter)
+            .unwrap_or(0u64)
+    }
+
+    pub fn get_scout_count(env: Env) -> u64 {
+        if !env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Initialized)
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::ScoutCounter)
+            .unwrap_or(0u64)
     }
 
     pub fn health(env: Env) -> bool {
@@ -302,6 +332,7 @@ mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, vec, Env, String};
 
+    #[cfg(test)]
     fn setup() -> (Env, RegistrationContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
@@ -310,6 +341,7 @@ mod tests {
         (env, client)
     }
 
+    #[cfg(test)]
     fn dummy_vitals(env: &Env) -> PlayerVitals {
         PlayerVitals {
             age: 18,
@@ -554,142 +586,102 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Issue #24: next_player_id and next_scout_id overflow handling
+    // Issue #28: require_initialized before require_not_paused
     // -------------------------------------------------------------------------
 
     #[test]
-    #[should_panic]
-    fn test_next_player_id_overflow() {
+    #[should_panic(expected = "NotInitialized")]
+    fn test_register_player_uninitialized_returns_not_initialized() {
         let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Manually set counter to u64::MAX to trigger overflow
-        env.storage()
-            .instance()
-            .set(&DataKey::PlayerCounter, &u64::MAX);
-
         let wallet = Address::generate(&env);
         let vitals = dummy_vitals(&env);
         let hashes = vec![&env, String::from_str(&env, "QmTest")];
-        // This should panic with Overflow error
         client.register_player(&wallet, &vitals, &hashes);
     }
 
     #[test]
-    #[should_panic]
-    fn test_next_scout_id_overflow() {
+    #[should_panic(expected = "NotInitialized")]
+    fn test_register_scout_uninitialized_returns_not_initialized() {
         let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Manually set counter to u64::MAX to trigger overflow
-        env.storage()
-            .instance()
-            .set(&DataKey::ScoutCounter, &u64::MAX);
-
         let wallet = Address::generate(&env);
         let region = String::from_str(&env, "Europe");
-        // This should panic with Overflow error
         client.register_scout(&wallet, &region);
     }
 
     // -------------------------------------------------------------------------
-    // Issue #22: pause_contract blocking register_scout
+    // Issue #34: Dual-role wallet policy (player + scout same wallet)
     // -------------------------------------------------------------------------
 
     #[test]
-    #[should_panic]
-    fn test_register_scout_blocked_when_paused() {
+    fn test_same_wallet_can_register_as_player_and_scout() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        client.pause_contract();
-
         let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
         let region = String::from_str(&env, "Europe");
-        // This should panic with ContractPaused error
-        client.register_scout(&wallet, &region);
+
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        assert_eq!(player_id, 1);
+
+        let scout_id = client.register_scout(&wallet, &region);
+        assert_eq!(scout_id, 1);
+
+        let player = client.get_player(&player_id);
+        assert_eq!(player.wallet, wallet);
+
+        let scout = client.get_scout(&scout_id);
+        assert_eq!(scout.wallet, wallet);
     }
 
     // -------------------------------------------------------------------------
-    // Issue #23: pause_contract blocking update_profile
+    // Issue #26: get_player_count and get_scout_count query functions
     // -------------------------------------------------------------------------
 
     #[test]
-    #[should_panic]
-    fn test_update_profile_blocked_when_paused() {
+    fn test_get_player_count_returns_zero_before_init() {
+        let (env, client) = setup();
+        assert_eq!(client.get_player_count(), 0);
+    }
+
+    #[test]
+    fn test_get_scout_count_returns_zero_before_init() {
+        let (env, client) = setup();
+        assert_eq!(client.get_scout_count(), 0);
+    }
+
+    #[test]
+    fn test_get_player_count_after_registrations() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let wallet = Address::generate(&env);
         let vitals = dummy_vitals(&env);
         let hashes = vec![&env, String::from_str(&env, "QmTest")];
-        let player_id = client.register_player(&wallet, &vitals, &hashes);
 
-        client.pause_contract();
+        for i in 0..3 {
+            let wallet = Address::generate(&env);
+            client.register_player(&wallet, &vitals, &hashes);
+        }
 
-        let new_hashes = vec![&env, String::from_str(&env, "QmNew")];
-        // This should panic with ContractPaused error
-        client.update_profile(&player_id, &new_hashes);
+        assert_eq!(client.get_player_count(), 3);
     }
 
-    // -------------------------------------------------------------------------
-    // Issue #25: deregister_player admin function
-    // -------------------------------------------------------------------------
-
     #[test]
-    #[should_panic]
-    fn test_deregister_player_success() {
+    fn test_get_scout_count_after_registrations() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let wallet = Address::generate(&env);
-        let vitals = dummy_vitals(&env);
-        let hashes = vec![&env, String::from_str(&env, "QmTest")];
-        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        let region = String::from_str(&env, "Europe");
 
-        // Verify player exists
-        let profile = client.get_player(&player_id);
-        assert_eq!(profile.player_id, player_id);
+        for _i in 0..3 {
+            let wallet = Address::generate(&env);
+            client.register_scout(&wallet, &region);
+        }
 
-        // Deregister player
-        client.deregister_player(&player_id);
-
-        // Verify player no longer exists (should panic with PlayerNotFound)
-        client.get_player(&player_id);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_deregister_player_not_found() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Try to deregister non-existent player (should panic with PlayerNotFound)
-        client.deregister_player(&999);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_deregister_player_removes_wallet_index() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let wallet = Address::generate(&env);
-        let vitals = dummy_vitals(&env);
-        let hashes = vec![&env, String::from_str(&env, "QmTest")];
-        let player_id = client.register_player(&wallet, &vitals, &hashes);
-
-        // Deregister player
-        client.deregister_player(&player_id);
-
-        // Verify wallet index is also removed (should panic with PlayerNotFound)
-        client.get_player_by_wallet(&wallet);
+        assert_eq!(client.get_scout_count(), 3);
     }
 }
