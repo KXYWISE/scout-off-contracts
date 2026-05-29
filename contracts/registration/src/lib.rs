@@ -201,6 +201,36 @@ impl RegistrationContract {
             .ok_or(ScoutChainError::ScoutNotFound)
     }
 
+    pub fn get_player_count(env: Env) -> u64 {
+        if !env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Initialized)
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::PlayerCounter)
+            .unwrap_or(0u64)
+    }
+
+    pub fn get_scout_count(env: Env) -> u64 {
+        if !env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Initialized)
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::ScoutCounter)
+            .unwrap_or(0u64)
+    }
+
     pub fn health(env: Env) -> bool {
         env.storage()
             .instance()
@@ -590,5 +620,54 @@ mod tests {
 
         let scout = client.get_scout(&scout_id);
         assert_eq!(scout.wallet, wallet);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #26: get_player_count and get_scout_count query functions
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_player_count_returns_zero_before_init() {
+        let (env, client) = setup();
+        assert_eq!(client.get_player_count(), 0);
+    }
+
+    #[test]
+    fn test_get_scout_count_returns_zero_before_init() {
+        let (env, client) = setup();
+        assert_eq!(client.get_scout_count(), 0);
+    }
+
+    #[test]
+    fn test_get_player_count_after_registrations() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        for i in 0..3 {
+            let wallet = Address::generate(&env);
+            client.register_player(&wallet, &vitals, &hashes);
+        }
+
+        assert_eq!(client.get_player_count(), 3);
+    }
+
+    #[test]
+    fn test_get_scout_count_after_registrations() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let region = String::from_str(&env, "Europe");
+
+        for _i in 0..3 {
+            let wallet = Address::generate(&env);
+            client.register_scout(&wallet, &region);
+        }
+
+        assert_eq!(client.get_scout_count(), 3);
     }
 }
