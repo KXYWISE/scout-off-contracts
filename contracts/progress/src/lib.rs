@@ -248,6 +248,23 @@ mod tests {
     }
 
     #[test]
+    fn test_advance_level_not_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        // Register the contract but deliberately skip initialize()
+        let id = env.register_contract(None, ProgressContract);
+        let client = ProgressContractClient::new(&env, &id);
+
+        let caller = Address::generate(&env);
+        let result = client.try_advance_level(&caller, &99u64, &1u32);
+
+        assert_eq!(
+            result,
+            Err(Ok(ProgressError::NotInitialized))
+        );
+    }
+
+    #[test]
     #[should_panic]
     fn test_cannot_exceed_elite_tier() {
         let (env, client) = setup();
