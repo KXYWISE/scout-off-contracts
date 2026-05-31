@@ -49,4 +49,6 @@ pub enum DataKey {
     PlayerByWallet(Address),
     Scout(u64),
     ScoutByWallet(Address),
+    /// progress contract address — only this address may call set_player_level
+    ProgressContract,
 }

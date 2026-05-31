@@ -46,6 +46,36 @@ impl RegistrationContract {
         Ok(())
     }
 
+    /// Store the progress contract address so it can call set_player_level (admin only).
+    pub fn set_progress_contract(env: Env, addr: Address) -> Result<(), ScoutChainError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&DataKey::ProgressContract, &addr);
+        Ok(())
+    }
+
+    /// Update a player's progress level. Only callable by the registered progress contract.
+    pub fn set_player_level(
+        env: Env,
+        player_id: u64,
+        level: ProgressLevel,
+    ) -> Result<(), ScoutChainError> {
+        let progress_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProgressContract)
+            .ok_or(ScoutChainError::Unauthorized)?;
+        progress_contract.require_auth();
+
+        let mut profile = Self::load_player(&env, player_id)?;
+        profile.level = level;
+        profile.updated_at = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Player(player_id), &profile);
+        events::player_level_synced(&env, player_id);
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // Player registration
     // -------------------------------------------------------------------------
@@ -683,5 +713,71 @@ mod tests {
         }
 
         assert_eq!(client.get_scout_count(), 3);
+    }
+
+    // -------------------------------------------------------------------------
+    // set_player_level tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_set_player_level_updates_level_and_timestamp() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        // Advance time so updated_at will differ from registered_at.
+        env.ledger().with_mut(|l| l.timestamp += 100);
+
+        let progress_contract = Address::generate(&env);
+        client.set_progress_contract(&progress_contract);
+
+        client.set_player_level(&player_id, &ProgressLevel::VerifiedIdentity);
+
+        let profile = client.get_player(&player_id);
+        assert_eq!(profile.level, ProgressLevel::VerifiedIdentity);
+        assert!(profile.updated_at > profile.registered_at);
+    }
+
+    #[test]
+    fn test_set_player_level_emits_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        let progress_contract = Address::generate(&env);
+        client.set_progress_contract(&progress_contract);
+
+        let events_before = env.events().all().len();
+        client.set_player_level(&player_id, &ProgressLevel::PerformanceMilestones);
+        let events_after = env.events().all().len();
+
+        // set_player_level must emit exactly one new event.
+        assert_eq!(events_after, events_before + 1);
+    }
+
+    #[test]
+    fn test_set_player_level_rejects_unauthorized_caller() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        // No progress contract configured → Unauthorized.
+        let result = client.try_set_player_level(&player_id, &ProgressLevel::VerifiedIdentity);
+        assert_eq!(result, Err(Ok(ScoutChainError::Unauthorized)));
     }
 }
