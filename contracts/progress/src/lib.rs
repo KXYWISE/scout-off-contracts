@@ -226,6 +226,28 @@ mod tests {
     }
 
     #[test]
+    fn test_get_history_entry_correct_data() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        let player_id = 42u64;
+        let milestone = 7u32;
+
+        // Advance once: Unverified → VerifiedIdentity
+        client.advance_level(&validator, &player_id, &milestone);
+
+        // History index starts at 1
+        let entry = client.get_history_entry(&player_id, &1u32);
+
+        assert_eq!(entry.old_level, ProgressLevel::Unverified);
+        assert_eq!(entry.new_level, ProgressLevel::VerifiedIdentity);
+        assert_eq!(entry.updated_by, validator);
+        assert_eq!(entry.milestone_ref, milestone);
+    }
+
+    #[test]
     #[should_panic]
     fn test_cannot_exceed_elite_tier() {
         let (env, client) = setup();

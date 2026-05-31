@@ -18,3 +18,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Local PR drafts
+pr-*.md
