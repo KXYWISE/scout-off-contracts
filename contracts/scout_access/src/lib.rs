@@ -101,6 +101,21 @@ impl ScoutAccessContract {
         Self::require_initialized(&env)?;
         scout.require_auth();
 
+        // Downgrade guard: if an active subscription exists, only allow same
+        // tier or an upgrade. Downgrades before expiry are rejected.
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Subscription>(&DataKey::Subscription(scout.clone()))
+        {
+            let now = env.ledger().timestamp();
+            if now <= existing.expires_at
+                && Self::tier_rank(&tier) < Self::tier_rank(&existing.tier)
+            {
+                return Err(ScoutAccessError::SubscriptionDowngradeNotAllowed);
+            }
+        }
+
         let config = Self::fee_config(&env);
         let fee = match &tier {
             SubscriptionTier::Basic => config.basic_sub_stroops,
@@ -412,10 +427,17 @@ impl ScoutAccessContract {
         }
         Ok(())
     }
-}
 
-// =============================================================================
-// Tests
+    /// Numeric rank for a subscription tier (higher = more privileged).
+    /// Basic = 1, Pro = 2, Elite = 3.
+    fn tier_rank(tier: &SubscriptionTier) -> u32 {
+        match tier {
+            SubscriptionTier::Basic => 1,
+            SubscriptionTier::Pro => 2,
+            SubscriptionTier::Elite => 3,
+        }
+    }
+}
 // =============================================================================
 #[cfg(test)]
 mod tests {
@@ -766,5 +788,113 @@ mod tests {
         assert!(result.is_ok());
         let stored = client.get_fee_config();
         assert_eq!(stored.contact_fee_stroops, 200_000);
+    }
+
+    // -------------------------------------------------------------------------
+    // Downgrade guard tests (issue #103)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_downgrade_elite_to_pro_before_expiry_returns_error() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        // Subscribe at Elite
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        // Attempt downgrade to Pro while still active — must be rejected
+        let result = client.try_subscribe(&scout, &SubscriptionTier::Pro);
+        assert_eq!(result, Err(Ok(ScoutAccessError::SubscriptionDowngradeNotAllowed)));
+    }
+
+    #[test]
+    fn test_downgrade_elite_to_basic_before_expiry_returns_error() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        let result = client.try_subscribe(&scout, &SubscriptionTier::Basic);
+        assert_eq!(result, Err(Ok(ScoutAccessError::SubscriptionDowngradeNotAllowed)));
+    }
+
+    #[test]
+    fn test_downgrade_pro_to_basic_before_expiry_returns_error() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+
+        let result = client.try_subscribe(&scout, &SubscriptionTier::Basic);
+        assert_eq!(result, Err(Ok(ScoutAccessError::SubscriptionDowngradeNotAllowed)));
+    }
+
+    #[test]
+    fn test_upgrade_basic_to_elite_before_expiry_succeeds() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+        let basic_sub = client.get_subscription(&scout);
+
+        // Upgrade to Elite — must succeed and extend expiry
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        let elite_sub = client.get_subscription(&scout);
+
+        assert_eq!(elite_sub.tier, SubscriptionTier::Elite);
+        assert!(elite_sub.expires_at >= basic_sub.expires_at);
+    }
+
+    #[test]
+    fn test_upgrade_pro_to_elite_before_expiry_succeeds() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        let sub = client.get_subscription(&scout);
+        assert_eq!(sub.tier, SubscriptionTier::Elite);
+    }
+
+    #[test]
+    fn test_resubscribe_at_lower_tier_after_expiry_succeeds() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        // Fast-forward past expiry (31 days)
+        env.ledger().with_mut(|l| {
+            l.timestamp += 31 * 24 * 60 * 60;
+        });
+
+        // Downgrade after expiry — must succeed
+        let result = client.try_subscribe(&scout, &SubscriptionTier::Basic);
+        assert!(result.is_ok());
+        let sub = client.get_subscription(&scout);
+        assert_eq!(sub.tier, SubscriptionTier::Basic);
+    }
+
+    #[test]
+    fn test_resubscribe_same_tier_after_expiry_succeeds() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+
+        env.ledger().with_mut(|l| {
+            l.timestamp += 31 * 24 * 60 * 60;
+        });
+
+        let result = client.try_subscribe(&scout, &SubscriptionTier::Pro);
+        assert!(result.is_ok());
     }
 }
