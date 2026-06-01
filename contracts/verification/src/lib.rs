@@ -347,12 +347,23 @@ impl VerificationContract {
             .ok_or(VerificationError::ValidatorNotFound)
     }
 
-    pub fn is_active_validator(env: Env, wallet: Address) -> bool {
-        env.storage()
+    /// Returns the detailed status of a validator wallet.
+    pub fn get_validator_status(env: Env, wallet: Address) -> ValidatorStatus {
+        match env
+            .storage()
             .persistent()
             .get::<DataKey, Validator>(&DataKey::Validator(wallet))
-            .map(|v| v.active)
-            .unwrap_or(false)
+        {
+            None => ValidatorStatus::NotRegistered,
+            Some(v) if v.active => ValidatorStatus::Active,
+            Some(_) => ValidatorStatus::Revoked,
+        }
+    }
+
+    /// Deprecated: use `get_validator_status` instead.
+    /// Returns true only for registered, active validators.
+    pub fn is_active_validator(env: Env, wallet: Address) -> bool {
+        Self::get_validator_status(env, wallet) == ValidatorStatus::Active
     }
 
     pub fn health(env: Env) -> ContractHealth {
