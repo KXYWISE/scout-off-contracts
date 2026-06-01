@@ -7,6 +7,9 @@ use types::{DataKey, ProgressEntry, ProgressLevel};
 
 use soroban_sdk::{contract, contractimpl, Address, Env};
 
+const INSTANCE_TTL_MIN: u32 = 100;
+const INSTANCE_TTL_MAX: u32 = 500;
+
 #[contract]
 pub struct ProgressContract;
 
@@ -17,6 +20,7 @@ impl ProgressContract {
     // -------------------------------------------------------------------------
 
     pub fn initialize(env: Env, admin: Address) -> Result<(), ProgressError> {
+        Self::bump_instance_ttl(&env);
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(ProgressError::AlreadyInitialized);
         }
@@ -28,12 +32,14 @@ impl ProgressContract {
     }
 
     pub fn pause_contract(env: Env) -> Result<(), ProgressError> {
+        Self::bump_instance_ttl(&env);
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         Ok(())
     }
 
     pub fn unpause_contract(env: Env) -> Result<(), ProgressError> {
+        Self::bump_instance_ttl(&env);
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
@@ -41,6 +47,7 @@ impl ProgressContract {
 
     /// Transfer admin rights to a new address (current admin auth required).
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ProgressError> {
+        Self::bump_instance_ttl(&env);
         let old_admin: Address = env
             .storage()
             .instance()
@@ -92,6 +99,7 @@ impl ProgressContract {
         player_id: u64,
         milestone_ref: u32,
     ) -> Result<ProgressLevel, ProgressError> {
+        Self::bump_instance_ttl(&env);
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
 
@@ -139,6 +147,7 @@ impl ProgressContract {
     }
 
     pub fn get_history_count(env: Env, player_id: u64) -> u32 {
+        Self::bump_instance_ttl(&env);
         env.storage()
             .persistent()
             .get(&DataKey::HistoryCounter(player_id))
@@ -150,6 +159,7 @@ impl ProgressContract {
         player_id: u64,
         index: u32,
     ) -> Result<ProgressEntry, ProgressError> {
+        Self::bump_instance_ttl(&env);
         env.storage()
             .persistent()
             .get(&DataKey::HistoryEntry(player_id, index))
@@ -157,6 +167,7 @@ impl ProgressContract {
     }
 
     pub fn health(env: Env) -> bool {
+        Self::bump_instance_ttl(&env);
         env.storage()
             .instance()
             .get::<DataKey, bool>(&DataKey::Initialized)
@@ -166,6 +177,12 @@ impl ProgressContract {
     // -------------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------------
+
+    fn bump_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_MIN, INSTANCE_TTL_MAX);
+    }
 
     fn get_current_level(env: &Env, player_id: u64) -> ProgressLevel {
         env.storage()
