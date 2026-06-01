@@ -1,27 +1,6 @@
 use soroban_sdk::{contracttype, Address};
 
-/// Mirrors the four-tier level in registration — kept in sync manually
-/// (or via a shared crate in a future refactor).
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub enum ProgressLevel {
-    Unverified,
-    VerifiedIdentity,
-    PerformanceMilestones,
-    EliteTier,
-}
-
-impl ProgressLevel {
-    /// Returns the next valid level, or None if already at the top.
-    pub fn next(&self) -> Option<ProgressLevel> {
-        match self {
-            ProgressLevel::Unverified => Some(ProgressLevel::VerifiedIdentity),
-            ProgressLevel::VerifiedIdentity => Some(ProgressLevel::PerformanceMilestones),
-            ProgressLevel::PerformanceMilestones => Some(ProgressLevel::EliteTier),
-            ProgressLevel::EliteTier => None,
-        }
-    }
-}
+pub use scoutchain_shared_types::ProgressLevel;
 
 /// A single entry in the immutable progress history
 #[contracttype]
@@ -35,6 +14,8 @@ pub struct ProgressEntry {
     pub updated_at: u64,
     /// Milestone index from the verification contract that triggered this
     pub milestone_ref: u32,
+    /// Ledger sequence number at the time of the level change
+    pub ledger_sequence: u32,
 }
 
 #[contracttype]

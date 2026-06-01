@@ -17,8 +17,14 @@ Handles player and scout on-chain identity.
 | `get_player(player_id)` | — | Read player profile |
 | `get_player_by_wallet(wallet)` | — | Lookup player by wallet |
 | `get_scout(scout_id)` | — | Read scout profile |
+| `get_player_count()` | — | Total registered players |
+| `get_scout_count()` | — | Total registered scouts |
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
 | `health()` | — | Returns true if initialized |
+
+### Dual-Role Wallet Policy
+
+A single wallet address **may register as both a player and a scout**. This is intentional and allowed. A wallet can hold both roles simultaneously without restriction. Duplicate prevention is enforced per role (a wallet cannot register twice as a player, and cannot register twice as a scout), but cross-role registration is permitted.
 
 ---
 
@@ -40,6 +46,14 @@ Manages the trusted validator registry and milestone approvals.
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
 | `health()` | — | Returns true if initialized |
 
+### Events
+
+| Event | Topics | Data | Description |
+|-------|--------|------|-------------|
+| `milestone_approved` | event_name, validator_address, milestone_index (u32) | player_id (u64), description (String), evidence_hash (String) | Emitted when a validator approves a player milestone with full milestone details |
+| `validator_registered` | event_name | validator_address | Emitted when a new validator is registered |
+| `validator_revoked` | event_name | validator_address | Emitted when a validator is deactivated |
+
 ---
 
 ## progress
@@ -50,9 +64,9 @@ Maintains the tamper-proof four-tier level state machine.
 |----------|------|-------------|
 | `initialize(admin)` | admin | One-time setup |
 | `advance_level(caller, player_id, milestone_ref)` | caller (validator or scout) | Move player up one level |
-| `get_level(player_id)` | — | Current progress level |
+| `get_level(player_id)` | — | Current progress level; returns `PlayerNotFound` if player is not registered |
 | `get_history_count(player_id)` | — | Number of level changes |
-| `get_history_entry(player_id, index)` | — | Specific history entry |
+| `get_history_entry(player_id, index)` | — | Specific history entry (`ProgressEntry` includes `ledger_sequence: u32` for tamper-proof auditability) |
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
 | `health()` | — | Returns true if initialized |
 
@@ -100,7 +114,7 @@ Handles scout subscriptions, pay-to-contact, and trial offer logging.
 | `scout_registered` | registration | New scout profile created |
 | `profile_updated` | registration | Player updates IPFS content hashes |
 | `milestone_approved` | verification | Validator confirms a player achievement |
-| `progress_updated` | progress | Player advances to a new level |
+| `progress_updated` | progress | Player advances to a new level (data: `player_id`, `new_level`, `milestone_ref`) |
 | `scout_subscribed` | scout_access | Scout purchases a subscription |
 | `player_contacted` | scout_access | Scout pays to unlock player contact |
 | `trial_offer_logged` | scout_access | Scout records a trial offer |
