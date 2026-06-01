@@ -357,6 +357,39 @@ mod tests {
     }
 
     #[test]
+    fn test_pause_and_unpause() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        let player_id = 42u64;
+
+        // --- pause ---
+        client.pause_contract();
+
+        // advance_level must be rejected with ContractPaused while paused
+        let err = client
+            .try_advance_level(&validator, &player_id, &1u32)
+            .expect_err("expected an error while paused");
+        assert_eq!(
+            err.unwrap(),
+            ProgressError::ContractPaused,
+            "expected ContractPaused error"
+        );
+
+        // player level must be unchanged
+        assert_eq!(client.get_level(&player_id), ProgressLevel::Unverified);
+
+        // --- unpause ---
+        client.unpause_contract();
+
+        // advance_level must now succeed
+        let new_level = client.advance_level(&validator, &player_id, &1u32);
+        assert_eq!(new_level, ProgressLevel::VerifiedIdentity);
+    }
+
+    #[test]
     #[should_panic]
     fn test_old_admin_loses_access_after_transfer() {
         let (env, client) = setup();
