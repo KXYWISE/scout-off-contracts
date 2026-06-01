@@ -11,7 +11,7 @@ pub fn contract_initialized(env: &Env, admin: &Address) {
 pub fn scout_subscribed(env: &Env, scout: &Address, tier: &SubscriptionTier) {
     env.events().publish(
         (Symbol::new(env, "scout_subscribed"), scout.clone()),
-        tier.clone(),
+        (tier.clone(), fee_paid),
     );
 }
 
