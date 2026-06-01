@@ -70,6 +70,13 @@ Maintains the tamper-proof four-tier level state machine.
 | `pause_contract()` / `unpause_contract()` | admin | Circuit breaker |
 | `health()` | — | Returns true if initialized |
 
+### Events
+
+| Event | Topics | Data | Description |
+|-------|--------|------|-------------|
+| `progress_updated` | event_name, updated_by (Address) | player_id (u64), old_level (ProgressLevel), new_level (ProgressLevel) | Emitted when a player advances to a new level; includes both the previous and new level so indexers do not need to infer the transition from history |
+| `admin_transferred` | event_name | old_admin (Address), new_admin (Address) | Emitted when admin rights are transferred to a new address |
+
 ---
 
 ## scout_access
