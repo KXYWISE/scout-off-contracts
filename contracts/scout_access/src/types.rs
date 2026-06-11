@@ -1,5 +1,4 @@
 use soroban_sdk::{contracttype, Address, String};
-use scoutchain_shared_types::ContractHealth;
 
 /// Subscription tier for scouts
 #[contracttype]

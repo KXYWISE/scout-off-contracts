@@ -134,7 +134,14 @@ impl ProgressContract {
             .persistent()
             .set(&DataKey::PlayerLevel(player_id), &new_level);
 
-        events::progress_updated(&env, player_id, &current, &new_level, &caller, milestone_ref);
+        events::progress_updated(
+            &env,
+            player_id,
+            &current,
+            &new_level,
+            &caller,
+            milestone_ref,
+        );
         Ok(new_level)
     }
 
@@ -168,9 +175,11 @@ impl ProgressContract {
             .persistent()
             .get(&DataKey::HistoryEntry(player_id, index))
             .ok_or(ProgressError::PlayerNotFound)?;
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::HistoryEntry(player_id, index), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        env.storage().persistent().extend_ttl(
+            &DataKey::HistoryEntry(player_id, index),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
         Ok(entry)
     }
 
@@ -204,15 +213,20 @@ impl ProgressContract {
 
     pub fn health(env: Env) -> ContractHealth {
         Self::bump_instance_ttl(&env);
-        let initialized = env.storage()
+        let initialized = env
+            .storage()
             .instance()
             .get::<DataKey, bool>(&DataKey::Initialized)
             .unwrap_or(false);
-        let paused = env.storage()
+        let paused = env
+            .storage()
             .instance()
             .get::<DataKey, bool>(&DataKey::Paused)
             .unwrap_or(false);
-        ContractHealth { initialized, paused }
+        ContractHealth {
+            initialized,
+            paused,
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -329,7 +343,10 @@ mod tests {
         // Player 2: advance to Level 1 (VerifiedIdentity)
         client.advance_level(&validator, &2u64, &3u32);
 
-        assert_eq!(client.get_level(&1u64), ProgressLevel::PerformanceMilestones);
+        assert_eq!(
+            client.get_level(&1u64),
+            ProgressLevel::PerformanceMilestones
+        );
         assert_eq!(client.get_level(&2u64), ProgressLevel::VerifiedIdentity);
         assert_eq!(client.get_history_count(&1u64), 2);
         assert_eq!(client.get_history_count(&2u64), 1);
@@ -392,10 +409,7 @@ mod tests {
         let caller = Address::generate(&env);
         let result = client.try_advance_level(&caller, &99u64, &1u32);
 
-        assert_eq!(
-            result,
-            Err(Ok(ProgressError::NotInitialized))
-        );
+        assert_eq!(result, Err(Ok(ProgressError::NotInitialized)));
     }
 
     #[test]
@@ -418,16 +432,28 @@ mod tests {
 
         // Entry 1: Unverified → VerifiedIdentity
         assert_eq!(history.get(0).unwrap().old_level, ProgressLevel::Unverified);
-        assert_eq!(history.get(0).unwrap().new_level, ProgressLevel::VerifiedIdentity);
+        assert_eq!(
+            history.get(0).unwrap().new_level,
+            ProgressLevel::VerifiedIdentity
+        );
         assert_eq!(history.get(0).unwrap().milestone_ref, 1u32);
 
         // Entry 2: VerifiedIdentity → PerformanceMilestones
-        assert_eq!(history.get(1).unwrap().old_level, ProgressLevel::VerifiedIdentity);
-        assert_eq!(history.get(1).unwrap().new_level, ProgressLevel::PerformanceMilestones);
+        assert_eq!(
+            history.get(1).unwrap().old_level,
+            ProgressLevel::VerifiedIdentity
+        );
+        assert_eq!(
+            history.get(1).unwrap().new_level,
+            ProgressLevel::PerformanceMilestones
+        );
         assert_eq!(history.get(1).unwrap().milestone_ref, 2u32);
 
         // Entry 3: PerformanceMilestones → EliteTier
-        assert_eq!(history.get(2).unwrap().old_level, ProgressLevel::PerformanceMilestones);
+        assert_eq!(
+            history.get(2).unwrap().old_level,
+            ProgressLevel::PerformanceMilestones
+        );
         assert_eq!(history.get(2).unwrap().new_level, ProgressLevel::EliteTier);
         assert_eq!(history.get(2).unwrap().milestone_ref, 3u32);
     }
@@ -472,7 +498,11 @@ mod tests {
                         Symbol::new(&env, "progress_updated").into_val(&env),
                         validator.into_val(&env),
                     ],
-                    (player_id, ProgressLevel::Unverified, ProgressLevel::VerifiedIdentity)
+                    (
+                        player_id,
+                        ProgressLevel::Unverified,
+                        ProgressLevel::VerifiedIdentity
+                    )
                         .into_val(&env),
                 )
             ]

@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use scoutchain_shared_types::ProgressLevel;
 use soroban_sdk::{Address, Env, Symbol};
 

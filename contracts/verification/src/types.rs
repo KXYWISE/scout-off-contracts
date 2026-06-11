@@ -1,5 +1,5 @@
-use soroban_sdk::{contracttype, Address, String};
 pub use scoutchain_shared_types::ContractHealth;
+use soroban_sdk::{contracttype, Address, String};
 
 /// Richer validator status — distinguishes unregistered from revoked.
 #[contracttype]

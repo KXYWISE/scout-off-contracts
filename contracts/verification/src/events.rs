@@ -1,4 +1,5 @@
-use soroban_sdk::{Address, Env, Symbol, String};
+#![allow(deprecated)]
+use soroban_sdk::{Address, Env, String, Symbol};
 
 pub fn milestone_approved(
     env: &Env,
@@ -19,10 +20,8 @@ pub fn milestone_approved(
 }
 
 pub fn validator_registered(env: &Env, wallet: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "validator_registered"),),
-        wallet.clone(),
-    );
+    env.events()
+        .publish((Symbol::new(env, "validator_registered"),), wallet.clone());
 }
 
 pub fn validator_revoked(env: &Env, wallet: &Address, reason: &String) {
@@ -33,24 +32,18 @@ pub fn validator_revoked(env: &Env, wallet: &Address, reason: &String) {
 }
 
 pub fn contract_paused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_paused"),),
-        admin.clone(),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_paused"),), admin.clone());
 }
 
 pub fn contract_unpaused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_unpaused"),),
-        admin.clone(),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_unpaused"),), admin.clone());
 }
 
 pub fn contract_initialized(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_initialized"),),
-        admin.clone(),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_initialized"),), admin.clone());
 }
 
 pub fn progress_contract_updated(env: &Env, progress_contract: &Address) {

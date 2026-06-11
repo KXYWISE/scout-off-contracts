@@ -43,6 +43,7 @@ mod progress_contract {
     }
 
     #[contractclient(name = "Client")]
+    #[allow(dead_code)]
     pub trait ProgressContractClient {
         fn advance_level(
             env: Env,
@@ -82,11 +83,7 @@ impl VerificationContract {
         progress_contract: Address,
     ) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
-        if env
-            .storage()
-            .instance()
-            .has(&DataKey::ProgressContractSet)
-        {
+        if env.storage().instance().has(&DataKey::ProgressContractSet) {
             return Err(VerificationError::AlreadyConfigured);
         }
         env.storage()
@@ -142,7 +139,7 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Validator(wallet.clone()), &validator);
-events::validator_registered(&env, &wallet);
+        events::validator_registered(&env, &wallet);
 
         // // ------ PASTE THE TRACKING LOGIC HERE ------
         let mut validator_vector: Vec<Address> = env
@@ -159,7 +156,9 @@ events::validator_registered(&env, &wallet);
             validator_vector.push_back(wallet.clone());
         }
 
-        env.storage().persistent().set(&DataKey::ValidatorVector, &validator_vector);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ValidatorVector, &validator_vector);
         // // -------------------------------------------
 
         Ok(())
@@ -251,7 +250,7 @@ events::validator_registered(&env, &wallet);
 
         // Validate evidence_hash: must start with "Qm" or "bafy", max 128 bytes
         let hash_len = evidence_hash.len();
-        if hash_len > 128 || hash_len < 2 {
+        if !(2..=128).contains(&hash_len) {
             return Err(VerificationError::InvalidInput);
         }
         let hash_bytes = evidence_hash.to_bytes();
@@ -278,15 +277,11 @@ events::validator_registered(&env, &wallet);
 
         // Increment milestone counter for this player
         let counter_key = DataKey::MilestoneCounter(player_id);
-        let index: u32 = env
-            .storage()
-            .persistent()
-            .get(&counter_key)
-            .unwrap_or(0u32);
+        let index: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0u32);
         let next_index = index.checked_add(1).ok_or(VerificationError::Overflow)?;
 
-        let description_for_event = description.clone();
-        let evidence_hash_for_event = evidence_hash.clone();
+        let _description_for_event = description.clone();
+        let _evidence_hash_for_event = evidence_hash.clone();
 
         let milestone = Milestone {
             player_id,
@@ -300,9 +295,7 @@ events::validator_registered(&env, &wallet);
         env.storage()
             .persistent()
             .set(&DataKey::Milestone(player_id, next_index), &milestone);
-        env.storage()
-            .persistent()
-            .set(&counter_key, &next_index);
+        env.storage().persistent().set(&counter_key, &next_index);
 
         // Increment per-validator milestone count
         let val_key = DataKey::ValidatorMilestoneCount(validator_wallet.clone());
@@ -398,15 +391,20 @@ events::validator_registered(&env, &wallet);
     }
 
     pub fn health(env: Env) -> ContractHealth {
-        let initialized = env.storage()
+        let initialized = env
+            .storage()
             .instance()
             .get::<DataKey, bool>(&DataKey::Initialized)
             .unwrap_or(false);
-        let paused = env.storage()
+        let paused = env
+            .storage()
             .instance()
             .get::<DataKey, bool>(&DataKey::Paused)
             .unwrap_or(false);
-        ContractHealth { initialized, paused }
+        ContractHealth {
+            initialized,
+            paused,
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -442,7 +440,10 @@ events::validator_registered(&env, &wallet);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Events, Ledger}, Env, String, Symbol, IntoVal};
+    use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger},
+        Env, IntoVal, String, Symbol,
+    };
 
     fn setup() -> (Env, VerificationContractClient<'static>) {
         let env = Env::default();
@@ -465,7 +466,10 @@ mod tests {
         client.register_validator(&validator, &String::from_str(&env, "Coach"));
 
         // Unknown wallet returns 0
-        assert_eq!(client.get_validator_milestone_count(&Address::generate(&env)), 0);
+        assert_eq!(
+            client.get_validator_milestone_count(&Address::generate(&env)),
+            0
+        );
 
         for i in 1u64..=3 {
             client.approve_milestone(
@@ -558,10 +562,7 @@ mod tests {
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "Coach"));
-        let reason = Some(String::from_str(
-            &env,
-            "Misconduct and protocol violation",
-        ));
+        let reason = Some(String::from_str(&env, "Misconduct and protocol violation"));
         client.revoke_validator(&validator, &reason);
 
         assert!(!client.is_active_validator(&validator));
@@ -861,4 +862,3 @@ mod tests {
         assert!(validators.contains(&v3));
     }
 }
-

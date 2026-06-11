@@ -1,5 +1,6 @@
-use soroban_sdk::{Address, Env, Symbol};
+#![allow(deprecated)]
 use crate::types::SubscriptionTier;
+use soroban_sdk::{Address, Env, Symbol};
 
 pub fn contract_initialized(env: &Env, admin: &Address) {
     env.events().publish(
@@ -38,21 +39,21 @@ pub fn fees_withdrawn(env: &Env, to: &Address, amount: i128) {
 
 pub fn admin_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
-        (Symbol::new(env, "admin_transferred"), old_admin.clone(), new_admin.clone()),
+        (
+            Symbol::new(env, "admin_transferred"),
+            old_admin.clone(),
+            new_admin.clone(),
+        ),
         (),
     );
 }
 
 pub fn contract_paused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_paused"),),
-        admin.clone(),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_paused"),), admin.clone());
 }
 
 pub fn contract_unpaused(env: &Env, admin: &Address) {
-    env.events().publish(
-        (Symbol::new(env, "contract_unpaused"),),
-        admin.clone(),
-    );
+    env.events()
+        .publish((Symbol::new(env, "contract_unpaused"),), admin.clone());
 }
