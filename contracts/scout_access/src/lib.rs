@@ -1385,6 +1385,11 @@ assert_eq!(
     scout_balance_before + refund_amount,
     scout_balance_after
 );
+            contract_balance_before - refund_amount,
+            contract_balance_after
+        );
+        assert_eq!(scout_balance_before + refund_amount, scout_balance_after);
+    }
 
     #[test]
     fn test_refund_subscription_zero_amount_rejected() {
