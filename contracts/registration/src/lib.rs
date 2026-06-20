@@ -1,3 +1,4 @@
+#![cfg_attr(target_family = "wasm", no_std)]
 mod errors;
 mod events;
 mod types;
@@ -10,6 +11,7 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 const MAX_STRING_LEN: u32 = 64;
 const MAX_REGION_LEN: u32 = 128;
 const MAX_IPFS_HASHES: u32 = 10;
+const ADMIN_BUMP_LEDGERS: u32 = 518400; // ~30 days at 5s/ledger
 
 #[contract]
 pub struct RegistrationContract;
@@ -26,7 +28,8 @@ impl RegistrationContract {
             return Err(ScoutChainError::AlreadyInitialized);
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::PlayerCounter, &0u64);
@@ -43,6 +46,14 @@ impl RegistrationContract {
     pub fn unpause_contract(env: Env) -> Result<(), ScoutChainError> {
         Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    /// Upgrade the contract WASM. Admin auth required.
+    /// Persistent storage (including Admin) survives this call.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ScoutChainError> {
+        Self::require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
@@ -239,10 +250,11 @@ impl RegistrationContract {
     fn require_admin(env: &Env) -> Result<(), ScoutChainError> {
         let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(ScoutChainError::NotInitialized)?;
         admin.require_auth();
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         Ok(())
     }
 
@@ -537,5 +549,26 @@ mod tests {
         let exactly_128 = String::from_str(&env, &"A".repeat(128));
         let scout_id = client.register_scout(&wallet, &exactly_128);
         assert_eq!(scout_id, 1);
+    }
+
+    #[test]
+    fn test_upgrade_preserves_admin() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Register a player so we confirm persistent data also survives
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        // Simulate upgrade: in testutils mode the host accepts empty bytes as a valid wasm blob
+        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+        client.upgrade(&new_wasm_hash);
+
+        // Admin persisted — admin-gated call still works
+        client.pause_contract();
+        assert_eq!(client.get_player(&player_id).player_id, player_id);
     }
 }

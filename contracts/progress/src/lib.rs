@@ -1,3 +1,4 @@
+#![cfg_attr(target_family = "wasm", no_std)]
 mod errors;
 mod events;
 mod types;
@@ -6,6 +7,8 @@ use errors::ProgressError;
 use types::{DataKey, ProgressEntry, ProgressLevel};
 
 use soroban_sdk::{contract, contractimpl, Address, Env};
+
+const ADMIN_BUMP_LEDGERS: u32 = 518400; // ~30 days at 5s/ledger
 
 #[contract]
 pub struct ProgressContract;
@@ -21,7 +24,8 @@ impl ProgressContract {
             return Err(ProgressError::AlreadyInitialized);
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
@@ -43,12 +47,21 @@ impl ProgressContract {
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ProgressError> {
         let old_admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(ProgressError::NotInitialized)?;
         old_admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         events::admin_transferred(&env, &old_admin, &new_admin);
+        Ok(())
+    }
+
+    /// Upgrade the contract WASM. Admin auth required.
+    /// Persistent storage (including Admin) survives this call.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ProgressError> {
+        Self::require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
@@ -177,10 +190,11 @@ impl ProgressContract {
     fn require_admin(env: &Env) -> Result<(), ProgressError> {
         let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(ProgressError::NotInitialized)?;
         admin.require_auth();
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         Ok(())
     }
 }
@@ -278,5 +292,23 @@ mod tests {
         // Clear mocks — old admin auth no longer stored, so pause must fail
         env.mock_auths(&[]);
         client.pause_contract();
+    }
+
+    #[test]
+    fn test_upgrade_preserves_admin() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.advance_level(&validator, &1u64, &1u32);
+
+        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+        client.upgrade(&new_wasm_hash);
+
+        // Admin persisted — admin-gated call still works
+        client.pause_contract();
+        // Player level data persisted
+        assert_eq!(client.get_level(&1u64), ProgressLevel::VerifiedIdentity);
     }
 }
