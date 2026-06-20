@@ -1340,7 +1340,10 @@ mod tests {
         let contract_balance_after = TokenClient::new(&env, &xlm).balance(&client.address);
         let scout_balance_after = TokenClient::new(&env, &xlm).balance(&scout);
 
-        assert_eq!(contract_balance_before - refund_amount, contract_balance_after);
+        assert_eq!(
+            contract_balance_before - refund_amount,
+            contract_balance_after
+        );
         assert_eq!(scout_balance_before + refund_amount, scout_balance_after);
     }
 
