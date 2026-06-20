@@ -1,3 +1,4 @@
+#![no_std]
 // IMPORTANT: Cross-contract wiring required after deployment
 //
 // `approve_milestone` calls `advance_level` on the progress contract to update
@@ -16,9 +17,11 @@ mod events;
 mod types;
 
 use errors::VerificationError;
-use types::{DataKey, Milestone, Validator};
+use types::{ContractHealth, DataKey, Milestone, Validator, ValidatorStatus};
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+
+const MAX_CREDENTIALS_LEN: u32 = 256;
 
 const ADMIN_BUMP_LEDGERS: u32 = 518400; // ~30 days at 5s/ledger
 
@@ -29,6 +32,32 @@ mod progress_contract {
     soroban_sdk::contractimport!(
         file = "fixtures/scoutchain_progress.wasm"
     );
+    use scoutchain_shared_types::ProgressLevel;
+    use soroban_sdk::{contractclient, contracterror, Address, Env};
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, PartialEq)]
+    #[repr(u32)]
+    pub enum Error {
+        AlreadyInitialized = 1,
+        NotInitialized = 2,
+        ContractPaused = 3,
+        Unauthorized = 4,
+        InvalidProgressTransition = 5,
+        AlreadyAtMaxLevel = 6,
+        PlayerNotFound = 7,
+    }
+
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait ProgressContractClient {
+        fn advance_level(
+            env: Env,
+            caller: Address,
+            player_id: u64,
+            milestone_ref: u32,
+        ) -> Result<ProgressLevel, Error>;
+    }
 }
 
 #[contract]
@@ -49,12 +78,33 @@ impl VerificationContract {
         env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
+        events::contract_initialized(&env, &admin);
         Ok(())
     }
 
     /// Store the progress contract address so approve_milestone can call it.
     /// Must be called after both contracts are deployed (admin only).
+    /// Returns AlreadyConfigured if called more than once — use update_progress_contract instead.
     pub fn set_progress_contract(
+        env: Env,
+        progress_contract: Address,
+    ) -> Result<(), VerificationError> {
+        Self::require_admin(&env)?;
+        if env.storage().instance().has(&DataKey::ProgressContractSet) {
+            return Err(VerificationError::AlreadyConfigured);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ProgressContract, &progress_contract);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProgressContractSet, &true);
+        Ok(())
+    }
+
+    /// Update the progress contract address (admin only).
+    /// Use this for intentional re-wiring after the initial set_progress_contract call.
+    pub fn update_progress_contract(
         env: Env,
         progress_contract: Address,
     ) -> Result<(), VerificationError> {
@@ -62,6 +112,7 @@ impl VerificationContract {
         env.storage()
             .instance()
             .set(&DataKey::ProgressContract, &progress_contract);
+        events::progress_contract_updated(&env, &progress_contract);
         Ok(())
     }
 
@@ -73,6 +124,10 @@ impl VerificationContract {
     ) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
         Self::require_not_paused(&env)?;
+
+        if credentials.len() > MAX_CREDENTIALS_LEN {
+            return Err(VerificationError::InvalidInput);
+        }
 
         if env
             .storage()
@@ -91,14 +146,52 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Validator(wallet.clone()), &validator);
-
         events::validator_registered(&env, &wallet);
+
+        // // ------ PASTE THE TRACKING LOGIC HERE ------
+        let mut validator_vector: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorVector)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if validator_vector.len() >= 100 {
+            panic!("Maximum validator capacity of 100 reached");
+        }
+
+        if !validator_vector.contains(&wallet) {
+            validator_vector.push_back(wallet.clone());
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ValidatorVector, &validator_vector);
+        // // -------------------------------------------
+
         Ok(())
+    }
+    pub fn get_validators(env: Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ValidatorVector)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Deactivate a validator (admin only).
-    pub fn revoke_validator(env: Env, wallet: Address) -> Result<(), VerificationError> {
+    /// Optionally accepts a reason (max 128 bytes) that is included in the event.
+    pub fn revoke_validator(
+        env: Env,
+        wallet: Address,
+        reason: Option<String>,
+    ) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
+
+        if let Some(ref r) = reason {
+            if r.len() > 128 {
+                return Err(VerificationError::ReasonTooLong);
+            }
+        }
+
         let mut validator: Validator = env
             .storage()
             .persistent()
@@ -108,19 +201,33 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Validator(wallet.clone()), &validator);
-        events::validator_revoked(&env, &wallet);
+        events::validator_revoked(&env, &wallet, &reason.unwrap_or(String::from_str(&env, "")));
         Ok(())
     }
 
     pub fn pause_contract(env: Env) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(VerificationError::NotInitialized)?;
+
         env.storage().instance().set(&DataKey::Paused, &true);
+        events::contract_paused(&env, &admin);
         Ok(())
     }
 
     pub fn unpause_contract(env: Env) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(VerificationError::NotInitialized)?;
+
         env.storage().instance().set(&DataKey::Paused, &false);
+        events::contract_unpaused(&env, &admin);
         Ok(())
     }
 
@@ -156,6 +263,22 @@ impl VerificationContract {
         Self::require_not_paused(&env)?;
         validator_wallet.require_auth();
 
+        // Validate evidence_hash: must start with "Qm" or "bafy", max 128 bytes
+        let hash_len = evidence_hash.len();
+        if !(2..=128).contains(&hash_len) {
+            return Err(VerificationError::InvalidInput);
+        }
+        let hash_bytes = evidence_hash.to_bytes();
+        let starts_with_qm = hash_bytes.get(0) == Some(b'Q') && hash_bytes.get(1) == Some(b'm');
+        let starts_with_bafy = hash_len >= 4
+            && hash_bytes.get(0) == Some(b'b')
+            && hash_bytes.get(1) == Some(b'a')
+            && hash_bytes.get(2) == Some(b'f')
+            && hash_bytes.get(3) == Some(b'y');
+        if !starts_with_qm && !starts_with_bafy {
+            return Err(VerificationError::InvalidInput);
+        }
+
         // Verify the caller is an active validator
         let validator: Validator = env
             .storage()
@@ -169,18 +292,17 @@ impl VerificationContract {
 
         // Increment milestone counter for this player
         let counter_key = DataKey::MilestoneCounter(player_id);
-        let index: u32 = env
-            .storage()
-            .persistent()
-            .get(&counter_key)
-            .unwrap_or(0u32);
+        let index: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0u32);
         let next_index = index.checked_add(1).ok_or(VerificationError::Overflow)?;
+
+        let _description_for_event = description.clone();
+        let _evidence_hash_for_event = evidence_hash.clone();
 
         let milestone = Milestone {
             player_id,
             validator: validator_wallet.clone(),
-            description,
-            evidence_hash,
+            description: description.clone(),
+            evidence_hash: evidence_hash.clone(),
             approved_at: env.ledger().timestamp(),
             ledger_sequence: env.ledger().sequence(),
         };
@@ -188,9 +310,7 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Milestone(player_id, next_index), &milestone);
-        env.storage()
-            .persistent()
-            .set(&counter_key, &next_index);
+        env.storage().persistent().set(&counter_key, &next_index);
 
         // Increment per-validator milestone count
         let val_key = DataKey::ValidatorMilestoneCount(validator_wallet.clone());
@@ -199,7 +319,14 @@ impl VerificationContract {
             .persistent()
             .set(&val_key, &(val_count.checked_add(1).expect("overflow")));
 
-        events::milestone_approved(&env, player_id, &validator_wallet);
+        events::milestone_approved(
+            &env,
+            player_id,
+            &validator_wallet,
+            next_index,
+            &description,
+            &evidence_hash,
+        );
 
         // Cross-contract call: advance the player's progress level.
         // This is a best-effort call — if the progress contract is not set
@@ -211,14 +338,13 @@ impl VerificationContract {
             .get::<DataKey, Address>(&DataKey::ProgressContract)
         {
             let progress_client = progress_contract::Client::new(&env, &progress_addr);
-            // advance_level will return AlreadyAtMaxLevel if the player is
-            // already at EliteTier — we intentionally ignore that error here
-            // so the milestone is still recorded even at max level.
-            let _ = progress_client.try_advance_level(
-                &validator_wallet,
-                &player_id,
-                &next_index,
-            );
+            // AlreadyAtMaxLevel (6) is acceptable — milestone still recorded.
+            // Any other error propagates as ProgressCallFailed.
+            match progress_client.try_advance_level(&validator_wallet, &player_id, &next_index) {
+                Ok(_) => {}
+                Err(Ok(progress_contract::Error::AlreadyAtMaxLevel)) => {}
+                Err(_) => return Err(VerificationError::ProgressCallFailed),
+            }
         }
 
         Ok(next_index)
@@ -236,7 +362,7 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .get(&DataKey::Milestone(player_id, index))
-            .ok_or(VerificationError::InvalidInput)
+            .ok_or(VerificationError::MilestoneNotFound)
     }
 
     pub fn get_milestone_count(env: Env, player_id: u64) -> u32 {
@@ -260,19 +386,40 @@ impl VerificationContract {
             .ok_or(VerificationError::ValidatorNotFound)
     }
 
-    pub fn is_active_validator(env: Env, wallet: Address) -> bool {
-        env.storage()
+    /// Returns the detailed status of a validator wallet.
+    pub fn get_validator_status(env: Env, wallet: Address) -> ValidatorStatus {
+        match env
+            .storage()
             .persistent()
             .get::<DataKey, Validator>(&DataKey::Validator(wallet))
-            .map(|v| v.active)
-            .unwrap_or(false)
+        {
+            None => ValidatorStatus::NotRegistered,
+            Some(v) if v.active => ValidatorStatus::Active,
+            Some(_) => ValidatorStatus::Revoked,
+        }
     }
 
-    pub fn health(env: Env) -> bool {
-        env.storage()
+    /// Deprecated: use `get_validator_status` instead.
+    /// Returns true only for registered, active validators.
+    pub fn is_active_validator(env: Env, wallet: Address) -> bool {
+        Self::get_validator_status(env, wallet) == ValidatorStatus::Active
+    }
+
+    pub fn health(env: Env) -> ContractHealth {
+        let initialized = env
+            .storage()
             .instance()
             .get::<DataKey, bool>(&DataKey::Initialized)
-            .unwrap_or(false)
+            .unwrap_or(false);
+        let paused = env
+            .storage()
+            .instance()
+            .get::<DataKey, bool>(&DataKey::Paused)
+            .unwrap_or(false);
+        ContractHealth {
+            initialized,
+            paused,
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -309,11 +456,17 @@ impl VerificationContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env, String};
+    use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger},
+        Env, IntoVal, String, Symbol,
+    };
 
     fn setup() -> (Env, VerificationContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 1;
+        });
         let id = env.register_contract(None, VerificationContract);
         let client = VerificationContractClient::new(&env, &id);
         (env, client)
@@ -329,7 +482,10 @@ mod tests {
         client.register_validator(&validator, &String::from_str(&env, "Coach"));
 
         // Unknown wallet returns 0
-        assert_eq!(client.get_validator_milestone_count(&Address::generate(&env)), 0);
+        assert_eq!(
+            client.get_validator_milestone_count(&Address::generate(&env)),
+            0
+        );
 
         for i in 1u64..=3 {
             client.approve_milestone(
@@ -346,7 +502,7 @@ mod tests {
     #[test]
     fn test_health_false_before_initialize() {
         let (_env, client) = setup();
-        assert!(!client.health());
+        assert!(!client.health().initialized);
     }
 
     #[test]
@@ -408,9 +564,39 @@ mod tests {
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "Coach"));
-        client.revoke_validator(&validator);
+        let reason: Option<String> = None;
+        client.revoke_validator(&validator, &reason);
 
         assert!(!client.is_active_validator(&validator));
+    }
+
+    #[test]
+    fn test_revoke_validator_with_reason() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        let reason = Some(String::from_str(&env, "Misconduct and protocol violation"));
+        client.revoke_validator(&validator, &reason);
+
+        assert!(!client.is_active_validator(&validator));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #10)")]
+    fn test_revoke_validator_reason_too_long() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        // 129-byte string
+        let long_reason = "x".repeat(129);
+        let reason = Some(String::from_str(&env, &long_reason));
+        client.revoke_validator(&validator, &reason);
     }
 
     #[test]
@@ -422,7 +608,8 @@ mod tests {
 
         let validator = Address::generate(&env);
         client.register_validator(&validator, &String::from_str(&env, "Coach"));
-        client.revoke_validator(&validator);
+        let reason: Option<String> = None;
+        client.revoke_validator(&validator, &reason);
 
         // Should panic — validator is inactive
         client.approve_milestone(
@@ -531,6 +718,84 @@ mod tests {
 
     #[test]
     fn test_upgrade_preserves_admin() {
+    fn test_pause_unpause_events() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.pause_contract();
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "contract_paused"),).into_val(&env),
+                    admin.clone().into_val(&env)
+                )
+            ]
+        );
+
+        client.unpause_contract();
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "contract_unpaused"),).into_val(&env),
+                    admin.clone().into_val(&env)
+                )
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_validator_not_found() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let unknown = Address::generate(&env);
+        client.get_validator(&unknown);
+    }
+
+    #[test]
+    fn test_set_progress_contract_second_call_returns_already_configured() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr = Address::generate(&env);
+        client.set_progress_contract(&addr);
+
+        let result = client.try_set_progress_contract(&addr);
+        assert_eq!(result, Err(Ok(VerificationError::AlreadyConfigured)));
+    }
+
+    #[test]
+    fn test_update_progress_contract_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let addr1 = Address::generate(&env);
+        let addr2 = Address::generate(&env);
+        client.set_progress_contract(&addr1);
+        // update should succeed without error
+        client.update_progress_contract(&addr2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Credentials length boundary tests (MAX_CREDENTIALS_LEN = 256)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn test_register_validator_credentials_257_bytes_fails() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -544,5 +809,81 @@ mod tests {
         // Admin persisted — admin-gated call still works
         client.revoke_validator(&validator);
         assert!(!client.is_active_validator(&validator));
+        // 257 ASCII bytes — must exceed the 256-byte limit
+        let too_long = "a".repeat(257);
+        client.register_validator(&validator, &String::from_str(&env, &too_long));
+    }
+
+    #[test]
+    fn test_register_validator_credentials_256_bytes_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        // Exactly 256 ASCII bytes — must be accepted
+        let exactly_256 = "a".repeat(256);
+        client.register_validator(&validator, &String::from_str(&env, &exactly_256));
+
+        assert!(client.is_active_validator(&validator));
+    }
+
+    #[test]
+    fn test_initialize_emits_contract_initialized_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let events = env.events().all();
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    client.address.clone(),
+                    (Symbol::new(&env, "contract_initialized"),).into_val(&env),
+                    admin.into_val(&env)
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn test_duplicate_initialize_emits_no_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Clear events after first initialize
+        let _ = env.events().all();
+
+        // Second initialize must fail and emit no event
+        let result = client.try_initialize(&admin);
+        assert!(result.is_err());
+        assert_eq!(env.events().all(), soroban_sdk::vec![&env]);
+    }
+
+    #[test]
+    fn test_get_validators_includes_revoked() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        let v3 = Address::generate(&env);
+
+        client.register_validator(&v1, &String::from_str(&env, "Credentials 1"));
+        client.register_validator(&v2, &String::from_str(&env, "Credentials 2"));
+        client.register_validator(&v3, &String::from_str(&env, "Credentials 3"));
+
+        let reason: Option<String> = None;
+        client.revoke_validator(&v2, &reason);
+
+        let validators = client.get_validators();
+        assert_eq!(validators.len(), 3);
+        assert!(validators.contains(&v1));
+        assert!(validators.contains(&v2));
+        assert!(validators.contains(&v3));
     }
 }
