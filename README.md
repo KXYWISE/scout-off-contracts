@@ -437,6 +437,15 @@ PROGRESS_CONTRACT_ID=
 SCOUT_ACCESS_CONTRACT_ID=
 ```
 
+### Mainnet Deployment Safety
+
+When deploying to mainnet, **always verify** `config/mainnet.json` has been updated with real values before running `./scripts/deploy.sh mainnet`. The deployment script will reject the operation if placeholder values remain. Additionally:
+
+1. Test the full deployment flow on testnet first
+2. Verify all addresses in `.env` are correct for mainnet
+3. Confirm `ADMIN_ADDRESS` is the intended account — ownership cannot be transferred after initialization
+4. Double-check the `XLM_TOKEN_ADDRESS` matches the mainnet address (not testnet)
+
 ## Testing
 
 ```bash
