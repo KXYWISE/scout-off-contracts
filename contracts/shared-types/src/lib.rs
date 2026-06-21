@@ -1,3 +1,4 @@
+#![no_std]
 use soroban_sdk::contracttype;
 
 /// Four-tier progress level for a player profile
@@ -12,6 +13,13 @@ pub enum ProgressLevel {
     PerformanceMilestones,
     /// Level 3 — scout feedback or trial offer logged
     EliteTier,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContractHealth {
+    pub initialized: bool,
+    pub paused: bool,
 }
 
 impl ProgressLevel {
