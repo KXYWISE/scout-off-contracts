@@ -4,16 +4,19 @@ mod events;
 mod types;
 
 use errors::ScoutAccessError;
-use types::{DataKey, FeeConfig, Subscription, SubscriptionTier, TrialOffer};
+use types::{DataKey, Subscription, TrialOffer};
+pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 
 use scoutchain_shared_types::{validate_cid, ContractHealth};
 
 // Generated client for cross-contract calls to the progress contract.
-// In native/test builds the mock implementation below is used instead.
+// Uses #[contractclient] so the real advance_level is invoked in both
+// WASM deployment and integration tests — not a mock.
 mod progress_contract {
-    use soroban_sdk::{contracterror, Address, Env, Error as SorobanError, Val};
+    use scoutchain_shared_types::ProgressLevel;
+    use soroban_sdk::{contractclient, contracterror, Address, Env};
 
     #[contracterror]
     #[derive(Copy, Clone, Debug, PartialEq)]
@@ -22,39 +25,17 @@ mod progress_contract {
         AlreadyAtMaxLevel = 6,
     }
 
-    pub struct Client<'a> {
-        #[allow(dead_code)]
-        pub env: Env,
-        #[allow(dead_code)]
-        pub contract_id: Address,
-        #[allow(dead_code)]
-        phantom: core::marker::PhantomData<&'a ()>,
-    }
-
-    impl<'a> Client<'a> {
-        pub fn new(env: &Env, contract_id: &Address) -> Self {
-            Self {
-                env: env.clone(),
-                contract_id: contract_id.clone(),
-                phantom: core::marker::PhantomData,
-            }
-        }
-
-        pub fn try_advance_level(
-            &self,
-            _caller: &Address,
-            _player_id: &u64,
-            _milestone_ref: &u32,
-        ) -> Result<Result<Val, Val>, Result<Error, SorobanError>> {
-            Ok(Ok(0u32.into()))
-        }
+    #[contractclient(name = "Client")]
+    #[allow(dead_code)]
+    pub trait ProgressContractClient {
+        fn advance_level(
+            env: Env,
+            caller: Address,
+            player_id: u64,
+            milestone_ref: u32,
+        ) -> Result<ProgressLevel, Error>;
     }
 }
-
-// Cross-contract client for the progress contract.
-// In native/test builds a mock implementation is used (see mod below).
-// For WASM deployment, the contractclient trait approach is used via the non-wasm mock
-// since contractimport! requires a pre-built wasm file not available at compile time.
 
 // Instance TTL bump
 const INSTANCE_TTL_MIN: u32 = 100;

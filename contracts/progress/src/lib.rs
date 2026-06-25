@@ -6,7 +6,9 @@ mod types;
 use errors::ProgressError;
 use types::{ContractHealth, DataKey, ProgressEntry, ProgressLevel};
 
-use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+
+const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const INSTANCE_TTL_MIN: u32 = 100;
 const INSTANCE_TTL_MAX: u32 = 500;
