@@ -49,4 +49,5 @@ pub enum DataKey {
     /// progress contract address (cross-contract calls)
     ProgressContract,
     ValidatorVector,
+    TotalMilestoneCount,
 }

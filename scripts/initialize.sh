@@ -4,6 +4,7 @@
 set -euo pipefail
 
 NETWORK="${1:-testnet}"
+# shellcheck source=/dev/null
 source .env.contracts
 
 ADMIN="${ADMIN_ADDRESS:?Set ADMIN_ADDRESS}"
@@ -57,6 +58,55 @@ stellar contract invoke \
   --network "$NETWORK" \
   -- set_progress_contract \
   --progress_contract "$PROGRESS_CONTRACT_ID"
+
+echo "==> Wiring registration ← progress cross-contract link..."
+stellar contract invoke \
+  --id "$REGISTRATION_CONTRACT_ID" \
+  --source "$DEPLOYER" \
+  --network "$NETWORK" \
+  -- set_progress_contract \
+  --addr "$PROGRESS_CONTRACT_ID"
+
+echo "==> Wiring progress → verification cross-contract link..."
+stellar contract invoke \
+  --id "$PROGRESS_CONTRACT_ID" \
+  --source "$DEPLOYER" \
+  --network "$NETWORK" \
+  -- set_verification_contract \
+  --addr "$VERIFICATION_CONTRACT_ID"
+
+echo "==> Wiring progress → registration cross-contract link..."
+stellar contract invoke \
+  --id "$PROGRESS_CONTRACT_ID" \
+  --source "$DEPLOYER" \
+  --network "$NETWORK" \
+  -- set_registration_contract \
+  --addr "$REGISTRATION_CONTRACT_ID"
+
+echo "==> Wiring scout_access → progress cross-contract link..."
+stellar contract invoke \
+  --id "$SCOUT_ACCESS_CONTRACT_ID" \
+  --source "$DEPLOYER" \
+  --network "$NETWORK" \
+  -- set_progress_contract \
+  --addr "$PROGRESS_CONTRACT_ID"
+
+
+echo ""
+echo "==> Querying deployed contract versions..."
+for entry in \
+  "registration:$REGISTRATION_CONTRACT_ID" \
+  "verification:$VERIFICATION_CONTRACT_ID" \
+  "progress:$PROGRESS_CONTRACT_ID" \
+  "scout_access:$SCOUT_ACCESS_CONTRACT_ID"; do
+  name="${entry%%:*}"
+  id="${entry#*:}"
+  version=$(stellar contract invoke \
+    --id "$id" \
+    --network "$NETWORK" \
+    -- version)
+  echo "    $name version => $version"
+done
 
 echo ""
 echo "==> All contracts initialized and wired."
