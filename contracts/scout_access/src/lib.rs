@@ -1,5 +1,4 @@
-#![no_std]
-mod errors;
+#![cfg_attr(target_family = "wasm", no_std)]mod errors;
 mod events;
 mod types;
 
@@ -82,7 +81,8 @@ impl ScoutAccessContract {
         }
         Self::validate_fee_config(&fee_config)?;
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::XlmToken, &xlm_token);
         env.storage()
             .instance()
@@ -182,6 +182,14 @@ impl ScoutAccessContract {
         let contract_addr = env.current_contract_address();
         token::Client::new(&env, &xlm).transfer(&contract_addr, &scout, &amount);
         events::subscription_refunded(&env, &scout, amount);
+        Ok(())
+    }
+
+    /// Upgrade the contract WASM. Admin auth required.
+    /// Persistent storage (including Admin) survives this call.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ScoutAccessError> {
+        Self::require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
@@ -624,10 +632,22 @@ impl ScoutAccessContract {
     // -------------------------------------------------------------------------
 
     fn require_admin(env: &Env) -> Result<(), ScoutAccessError> {
-        let admin = Self::get_admin(env);
-        admin.require_auth();
-        Ok(())
-    }
+    let admin: Address = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Admin)
+        .ok_or(ScoutAccessError::NotInitialized)?;
+
+    admin.require_auth();
+
+    env.storage().persistent().extend_ttl(
+        &DataKey::Admin,
+        ADMIN_BUMP_LEDGERS,
+        ADMIN_BUMP_LEDGERS,
+    );
+
+    Ok(())
+}
 
     fn require_initialized(env: &Env) -> Result<(), ScoutAccessError> {
         if !env
@@ -1086,6 +1106,21 @@ mod tests {
     }
 
     #[test]
+    fn test_upgrade_preserves_admin() {
+        let (env, admin, xlm, _contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Basic);
+
+        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+        client.upgrade(&new_wasm_hash);
+
+        // Admin persisted — admin-gated call still works
+        client.pause_contract();
+        // Subscription data persisted
+        let sub = client.get_subscription(&scout);
+        assert_eq!(sub.tier, SubscriptionTier::Basic);
+    }
     fn test_pause_unpause_events() {
         let (env, admin, _, _, client) = setup();
 
@@ -1523,6 +1558,14 @@ mod tests {
         let scout_balance_after = TokenClient::new(&env, &xlm).balance(&scout);
 
         assert_eq!(
+    contract_balance_before - refund_amount,
+    contract_balance_after
+);
+
+assert_eq!(
+    scout_balance_before + refund_amount,
+    scout_balance_after
+);
             contract_balance_before - refund_amount,
             contract_balance_after
         );

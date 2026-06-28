@@ -11,7 +11,7 @@
 //
 // The easiest way is to run `./scripts/initialize.sh` which does this for you.
 // Without this step, milestones are recorded but player levels will NOT advance.
-
+#![cfg_attr(target_family = "wasm", no_std)]
 mod errors;
 mod events;
 mod types;
@@ -36,6 +36,9 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 // The progress contract must be deployed and its address registered via
 // `set_progress_contract` before `approve_milestone` can advance levels.
 mod progress_contract {
+    soroban_sdk::contractimport!(
+        file = "fixtures/scoutchain_progress.wasm"
+    );
     use scoutchain_shared_types::ProgressLevel;
     use soroban_sdk::{contractclient, contracterror, Address, Env};
 
@@ -78,7 +81,8 @@ impl VerificationContract {
             return Err(VerificationError::AlreadyInitialized);
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
@@ -231,6 +235,14 @@ impl VerificationContract {
 
         env.storage().instance().set(&DataKey::Paused, &false);
         events::contract_unpaused(&env, &admin);
+        Ok(())
+    }
+
+    /// Upgrade the contract WASM. Admin auth required.
+    /// Persistent storage (including Admin) survives this call.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), VerificationError> {
+        Self::require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
 
@@ -432,10 +444,11 @@ impl VerificationContract {
     fn require_admin(env: &Env) -> Result<(), VerificationError> {
         let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(VerificationError::NotInitialized)?;
         admin.require_auth();
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         Ok(())
     }
 
@@ -566,7 +579,7 @@ mod tests {
         assert_eq!(client.get_milestone_count(&1u64), 1);
 
         let milestone = client.get_milestone(&1u64, &1);
-        assert!(milestone.ledger_sequence > 0);
+        assert_eq!(milestone.ledger_sequence, env.ledger().sequence());
     }
 
     #[test]
@@ -756,6 +769,7 @@ mod tests {
     }
 
     #[test]
+    fn test_upgrade_preserves_admin() {
     fn test_pause_unpause_events() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -861,6 +875,14 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+        client.upgrade(&new_wasm_hash);
+
+        // Admin persisted — admin-gated call still works
+        client.revoke_validator(&validator);
+        assert!(!client.is_active_validator(&validator));
         // 257 ASCII bytes — must exceed the 256-byte limit
         let too_long = "a".repeat(257);
         client.register_validator(&validator, &String::from_str(&env, &too_long));

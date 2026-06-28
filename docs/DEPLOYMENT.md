@@ -69,6 +69,84 @@ psql $DATABASE_URL -f migrations/001_initial_schema.sql
 - [ ] Verify all contract IDs in `.env.contracts`
 - [ ] Regenerate bindings: `./scripts/generate-bindings.sh mainnet`
 
+## Upgrading a Deployed Contract
+
+All four contracts expose an `upgrade(new_wasm_hash)` function (admin auth required). The admin address is stored in **persistent** storage so it survives the WASM swap.
+
+Instance storage (Initialized, Paused, counters, fee config) is **not** automatically carried over. You must re-apply it after the upgrade if those values need to be preserved.
+
+### Upgrade procedure
+
+**Step 1 — Read current instance state** (before upgrading)
+
+```bash
+# Save values you need to restore
+stellar contract invoke --id $CONTRACT_ID -- get_fee_config   # scout_access only
+```
+
+**Step 2 — Build and upload the new WASM**
+
+```bash
+stellar contract build
+stellar contract install \
+  --source $DEPLOYER_SECRET \
+  --network testnet \
+  --wasm target/wasm32v1-none/release/<contract_name>.wasm
+# Prints the new wasm hash: <NEW_WASM_HASH>
+```
+
+**Step 3 — Call `upgrade`** (must be called by the admin address)
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source $ADMIN_ADDRESS \
+  --network testnet \
+  -- upgrade \
+  --new_wasm_hash <NEW_WASM_HASH>
+```
+
+**Step 4 — Re-apply instance state** (if needed)
+
+For `scout_access`, restore fee config:
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  --source $ADMIN_ADDRESS --network testnet \
+  -- update_fee_config --fee_config '...'
+```
+
+For `verification`, re-wire the progress contract link:
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  --source $ADMIN_ADDRESS --network testnet \
+  -- set_progress_contract \
+  --progress_contract $PROGRESS_CONTRACT_ID
+```
+
+**Step 5 — Verify**
+
+```bash
+stellar contract invoke --id $CONTRACT_ID -- health
+```
+
+### What survives an upgrade
+
+| Data | Storage | Survives upgrade? |
+|------|---------|-------------------|
+| Admin address | Persistent | ✅ Yes |
+| Player / scout profiles | Persistent | ✅ Yes |
+| Validator registry | Persistent | ✅ Yes |
+| Milestone / subscription records | Persistent | ✅ Yes |
+| Initialized flag | Instance | ⚠️ Must re-set if wiped |
+| Paused flag | Instance | ⚠️ Must re-set if wiped |
+| Fee config (scout_access) | Instance | ⚠️ Must re-set |
+| XLM token address (scout_access) | Instance | ⚠️ Must re-set |
+| Progress contract link (verification) | Instance | ⚠️ Must re-wire |
+
+> **Note:** On Stellar, instance storage is **not** automatically wiped during an `upgrade()` call — only the contract code (WASM) is replaced. The table above reflects the risk if the new WASM changes the storage layout or if instance TTL expires. Always re-verify instance state after an upgrade.
+
 ## Common Mistakes
 
 **Milestones approved but player levels don't advance**

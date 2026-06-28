@@ -1,3 +1,4 @@
+#![cfg_attr(target_family = "wasm", no_std)]
 #![no_std]
 mod errors;
 mod events;
@@ -31,7 +32,8 @@ impl ProgressContract {
             return Err(ProgressError::AlreadyInitialized);
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
@@ -104,15 +106,21 @@ impl ProgressContract {
         Self::bump_instance_ttl(&env);
         let old_admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(ProgressError::NotInitialized)?;
         old_admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         events::admin_transferred(&env, &old_admin, &new_admin);
         Ok(())
     }
 
+    /// Upgrade the contract WASM. Admin auth required.
+    /// Persistent storage (including Admin) survives this call.
+    pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) -> Result<(), ProgressError> {
+        Self::require_admin(&env)?;
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
     /// Reset a player's level for dispute resolution.
     /// Existing history is preserved; a new history entry records the reset.
     pub fn reset_player_level(
@@ -441,10 +449,12 @@ impl ProgressContract {
     fn require_admin(env: &Env) -> Result<Address, ProgressError> {
         let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(ProgressError::NotInitialized)?;
         admin.require_auth();
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
+        Ok(())
         Ok(admin)
     }
 }
@@ -782,6 +792,7 @@ mod tests {
     }
 
     #[test]
+    fn test_upgrade_preserves_admin() {
     fn test_reset_player_level_success() {
         let (env, client, validator) = setup();
         let player_id = 1u64;

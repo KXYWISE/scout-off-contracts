@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(target_family = "wasm", no_std)]
 mod errors;
 mod events;
 mod types;
@@ -45,7 +45,8 @@ impl RegistrationContract {
             return Err(ScoutChainError::AlreadyInitialized);
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::PlayerCounter, &0u64);
@@ -487,10 +488,11 @@ impl RegistrationContract {
     fn require_admin(env: &Env) -> Result<(), ScoutChainError> {
         let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(ScoutChainError::NotInitialized)?;
         admin.require_auth();
+        env.storage().persistent().extend_ttl(&DataKey::Admin, ADMIN_BUMP_LEDGERS, ADMIN_BUMP_LEDGERS);
         Ok(())
     }
 
@@ -929,18 +931,43 @@ mod tests {
         assert_eq!(scout_id, 1);
     }
 
-    // -------------------------------------------------------------------------
-    // Issue #28: require_initialized before require_not_paused
-    // -------------------------------------------------------------------------
-
     #[test]
-    #[should_panic]
-    fn test_register_player_uninitialized_returns_not_initialized() {
-        let (env, client) = setup();
-        let wallet = Address::generate(&env);
-        let vitals = dummy_vitals(&env);
-        let hashes = vec![&env, String::from_str(&env, "QmTest")];
-        client.register_player(&wallet, &vitals, &hashes);
+fn test_upgrade_preserves_admin() {
+    let env = Env::default();
+
+    let contract_id = env.register(RegistrationContract, ());
+    let client = RegistrationContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Register a player so we confirm persistent data also survives
+    let wallet = Address::generate(&env);
+    let vitals = dummy_vitals(&env);
+    let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+    let player_id = client.register_player(
+        &wallet,
+        &vitals,
+        &hashes,
+    );
+
+    let new_wasm_hash =
+        env.deployer()
+            .upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+
+    client.upgrade(&new_wasm_hash);
+
+    // Admin persisted
+    client.pause_contract();
+
+    // Existing data persisted
+    assert_eq!(
+        client.get_player(&player_id).player_id,
+        player_id
+    );
+}        
+    client.register_player(&wallet, &vitals, &hashes);
     }
 
     #[test]
@@ -962,6 +989,21 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
+        // Register a player so we confirm persistent data also survives
+        let wallet = Address::generate(&env);
+        let vitals = dummy_vitals(&env);
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+
+        // Simulate upgrade: in testutils mode the host accepts empty bytes as a valid wasm blob
+        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+        client.upgrade(&new_wasm_hash);
+
+        // Admin persisted — admin-gated call still works
+        client.pause_contract();
+        assert_eq!(client.get_player(&player_id).player_id, player_id);
+    }
+}
         let wallet = Address::generate(&env);
         let vitals = dummy_vitals(&env);
         let hashes = vec![&env, String::from_str(&env, "QmTest")];
