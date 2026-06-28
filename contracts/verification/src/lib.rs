@@ -76,6 +76,9 @@ impl VerificationContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalMilestoneCount, &0u32);
         events::contract_initialized(&env, &admin);
         Ok(())
     }
@@ -296,6 +299,16 @@ impl VerificationContract {
             .persistent()
             .set(&val_key, &(val_count.checked_add(1).expect("overflow")));
 
+        // Increment global total milestone count
+        let total: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalMilestoneCount)
+            .unwrap_or(0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalMilestoneCount, &(total.checked_add(1).ok_or(VerificationError::Overflow)?));
+
         events::milestone_approved(
             &env,
             player_id,
@@ -353,6 +366,13 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .get(&DataKey::ValidatorMilestoneCount(wallet))
+            .unwrap_or(0u32)
+    }
+
+    pub fn get_total_milestone_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalMilestoneCount)
             .unwrap_or(0u32)
     }
 
@@ -453,6 +473,11 @@ mod tests {
         (env, client)
     }
 
+    // A valid 46-character CIDv0 for use in tests.
+    const VALID_CID_V0: &str = "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB";
+    // A valid CIDv1 (>= 59 chars starting with "bafy").
+    const VALID_CID_V1: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+
     #[test]
     fn test_validator_milestone_count() {
         let (env, client) = setup();
@@ -473,11 +498,37 @@ mod tests {
                 &validator,
                 &i,
                 &String::from_str(&env, "milestone"),
-                &String::from_str(&env, "QmEvidence"),
+                &String::from_str(&env, VALID_CID_V0),
             );
         }
 
         assert_eq!(client.get_validator_milestone_count(&validator), 3);
+    }
+
+    #[test]
+    fn test_total_milestone_count() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Initialized to 0
+        assert_eq!(client.get_total_milestone_count(), 0);
+
+        let v1 = Address::generate(&env);
+        let v2 = Address::generate(&env);
+        client.register_validator(&v1, &String::from_str(&env, "Coach A"));
+        client.register_validator(&v2, &String::from_str(&env, "Coach B"));
+
+        client.approve_milestone(&v1, &1u64, &String::from_str(&env, "m1"), &String::from_str(&env, "QmEv1"));
+        assert_eq!(client.get_total_milestone_count(), 1);
+
+        client.approve_milestone(&v1, &2u64, &String::from_str(&env, "m2"), &String::from_str(&env, "QmEv2"));
+        client.approve_milestone(&v2, &3u64, &String::from_str(&env, "m3"), &String::from_str(&env, "QmEv3"));
+        assert_eq!(client.get_total_milestone_count(), 3);
+
+        // per-validator counts still correct
+        assert_eq!(client.get_validator_milestone_count(&v1), 2);
+        assert_eq!(client.get_validator_milestone_count(&v2), 1);
     }
 
     #[test]
@@ -508,7 +559,7 @@ mod tests {
             &validator,
             &1u64,
             &String::from_str(&env, "Scored 5 goals in Local Cup"),
-            &String::from_str(&env, "QmEvidence123"),
+            &String::from_str(&env, VALID_CID_V0),
         );
         assert_eq!(idx, 1);
         assert_eq!(client.get_milestone_count(&1u64), 1);
@@ -530,13 +581,13 @@ mod tests {
             &validator,
             &1u64,
             &String::from_str(&env, "Identity verified"),
-            &String::from_str(&env, "QmKYC"),
+            &String::from_str(&env, VALID_CID_V0),
         );
         let idx2 = client.approve_milestone(
             &validator,
             &1u64,
             &String::from_str(&env, "Top speed 32 km/h"),
-            &String::from_str(&env, "QmSpeed"),
+            &String::from_str(&env, VALID_CID_V1),
         );
         assert_eq!(idx1, 1);
         assert_eq!(idx2, 2);
@@ -603,7 +654,7 @@ mod tests {
             &validator,
             &1u64,
             &String::from_str(&env, "Some milestone"),
-            &String::from_str(&env, "QmEvidence"),
+            &String::from_str(&env, VALID_CID_V0),
         );
     }
 
@@ -620,7 +671,7 @@ mod tests {
             &random,
             &1u64,
             &String::from_str(&env, "Some milestone"),
-            &String::from_str(&env, "QmEvidence"),
+            &String::from_str(&env, VALID_CID_V0),
         );
     }
 
@@ -639,13 +690,13 @@ mod tests {
             &validator1,
             &1u64,
             &String::from_str(&env, "Identity verified"),
-            &String::from_str(&env, "QmEvidence1"),
+            &String::from_str(&env, VALID_CID_V0),
         );
         client.approve_milestone(
             &validator2,
             &1u64,
             &String::from_str(&env, "Top speed 32 km/h"),
-            &String::from_str(&env, "QmEvidence2"),
+            &String::from_str(&env, VALID_CID_V1),
         );
 
         assert_eq!(client.get_milestone_count(&1u64), 2);
@@ -673,7 +724,7 @@ mod tests {
             &validator,
             &1u64,
             &String::from_str(&env, "Some milestone"),
-            &String::from_str(&env, "QmEvidence"),
+            &String::from_str(&env, VALID_CID_V0),
         );
     }
 
@@ -699,7 +750,7 @@ mod tests {
             &validator,
             &1u64,
             &String::from_str(&env, "overflow test"),
-            &String::from_str(&env, "QmHash"),
+            &String::from_str(&env, VALID_CID_V0),
         );
     }
 
@@ -885,5 +936,118 @@ mod tests {
         assert!(validators.contains(&v1));
         assert!(validators.contains(&v2));
         assert!(validators.contains(&v3));
+    }
+
+    // -------------------------------------------------------------------------
+    // #224: CID validation boundary tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn test_cidv0_too_short_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        // 45 chars starting with Qm — one short of valid CIDv0
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "test"),
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4Ygpq"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn test_cidv0_too_long_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        // 47 chars starting with Qm — one over valid CIDv0
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "test"),
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqBX"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn test_cidv0_invalid_base58_char_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        // 46 chars but contains '0' which is invalid in base58btc
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "test"),
+            &String::from_str(&env, "Qm0K1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
+        );
+    }
+
+    #[test]
+    fn test_cidv0_exactly_46_chars_accepted() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        let idx = client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "test"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn test_cidv1_too_short_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        // 58 chars starting with bafy — one short of valid CIDv1
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "test"),
+            &String::from_str(&env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzd"),
+        );
+    }
+
+    #[test]
+    fn test_cidv1_exactly_59_chars_accepted() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        let idx = client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "test"),
+            &String::from_str(&env, VALID_CID_V1),
+        );
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #9)")]
+    fn test_no_prefix_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+        client.approve_milestone(
+            &validator, &1u64,
+            &String::from_str(&env, "test"),
+            &String::from_str(&env, "zdj7WbTaiJT1fgatdet7Sjxf4PJQgXkGfXPFgq5a2SdxYqYg"),
+        );
     }
 }

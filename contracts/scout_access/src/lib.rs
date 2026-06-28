@@ -12,8 +12,8 @@ use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
 use scoutchain_shared_types::{validate_cid, ContractHealth};
 
 // Generated client for cross-contract calls to the progress contract.
-// Uses #[contractclient] so the real advance_level is invoked in both
-// WASM deployment and integration tests — not a mock.
+// The #[contractclient] macro generates a real Client that performs the
+// on-chain call — replacing the hand-written mock that was here before.
 mod progress_contract {
     use scoutchain_shared_types::ProgressLevel;
     use soroban_sdk::{contractclient, contracterror, Address, Env};
@@ -303,8 +303,95 @@ impl ScoutAccessContract {
             PERSISTENT_TTL_MIN,
             PERSISTENT_TTL_MAX,
         );
+
+        // Update scout-centric contact index
+        let index_key = DataKey::ScoutContacts(scout.clone());
+        let mut contacted: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !contacted.contains(&player_id) {
+            contacted.push_back(player_id);
+        }
+        env.storage().persistent().set(&index_key, &contacted);
+        env.storage()
+            .persistent()
+            .extend_ttl(&index_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+
         events::player_contacted(&env, player_id, &scout, config.contact_fee_stroops);
         Ok(())
+    }
+
+    /// Contact multiple players in a single transaction. Charges the contact fee
+    /// for each player that has not already been contacted. Already-contacted
+    /// players are silently skipped (no charge). The total fee for all new contacts
+    /// is deducted in a single token transfer. Returns the number of new contacts
+    /// that were recorded.
+    ///
+    /// Scout must have an active (non-expired) subscription.
+    pub fn batch_contact_players(
+        env: Env,
+        scout: Address,
+        player_ids: Vec<u64>,
+    ) -> Result<u32, ScoutAccessError> {
+        Self::bump_instance_ttl(&env);
+        Self::require_not_paused(&env)?;
+        Self::require_initialized(&env)?;
+        scout.require_auth();
+        Self::require_active_subscription(&env, &scout)?;
+
+        let config = Self::fee_config(&env);
+        let mut new_contacts: u32 = 0;
+
+        // First pass: count new (uncharged) contacts to compute total fee.
+        for i in 0..player_ids.len() {
+            let player_id = player_ids.get(i).unwrap();
+            if !env
+                .storage()
+                .persistent()
+                .has(&DataKey::ContactRecord(player_id, scout.clone()))
+            {
+                new_contacts = new_contacts
+                    .checked_add(1)
+                    .ok_or(ScoutAccessError::Overflow)?;
+            }
+        }
+
+        if new_contacts == 0 {
+            return Ok(0);
+        }
+
+        // Single token transfer for all new contacts combined.
+        let total_fee = config
+            .contact_fee_stroops
+            .checked_mul(new_contacts as i128)
+            .ok_or(ScoutAccessError::Overflow)?;
+        Self::collect_fee(&env, &scout, total_fee)?;
+
+        // Second pass: write contact records and emit events.
+        for i in 0..player_ids.len() {
+            let player_id = player_ids.get(i).unwrap();
+            let contact_key = DataKey::ContactRecord(player_id, scout.clone());
+            if env.storage().persistent().has(&contact_key) {
+                continue;
+            }
+            env.storage().persistent().set(&contact_key, &true);
+            env.storage().persistent().extend_ttl(
+                &contact_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+            events::player_contacted(&env, player_id, &scout, config.contact_fee_stroops);
+        }
+
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(scout.clone()),
+            PERSISTENT_TTL_MIN,
+            PERSISTENT_TTL_MAX,
+        );
+
+        Ok(new_contacts)
     }
 
     // -------------------------------------------------------------------------
@@ -431,6 +518,23 @@ impl ScoutAccessContract {
         exists
     }
 
+    /// Return all player_ids contacted by `scout` as an O(1) index lookup.
+    pub fn get_scout_contacts(env: Env, scout: Address) -> soroban_sdk::Vec<u64> {
+        Self::bump_instance_ttl(&env);
+        let key = DataKey::ScoutContacts(scout.clone());
+        let list = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !list.is_empty() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+        list
+    }
+
     pub fn get_trial_offer(
         env: Env,
         player_id: u64,
@@ -465,6 +569,32 @@ impl ScoutAccessContract {
             );
         }
         count
+    }
+
+    /// Return all trial offers for a player in a single call.
+    /// Bounded at 20 to prevent gas exhaustion. Returns empty Vec for no offers.
+    pub fn get_all_trial_offers(env: Env, player_id: u64) -> soroban_sdk::Vec<TrialOffer> {
+        const MAX_OFFERS: u32 = 20;
+        Self::bump_instance_ttl(&env);
+
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrialCounter(player_id))
+            .unwrap_or(0u32);
+
+        let limit = count.min(MAX_OFFERS);
+        let mut offers: soroban_sdk::Vec<TrialOffer> = soroban_sdk::Vec::new(&env);
+        for i in 1..=limit {
+            if let Some(offer) = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TrialOffer(player_id, i))
+            {
+                offers.push_back(offer);
+            }
+        }
+        offers
     }
 
     pub fn health(env: Env) -> ContractHealth {
@@ -838,7 +968,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
 
         client.subscribe(&scout, &SubscriptionTier::Elite);
-        let idx = client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmTrialDetails"));
+        let idx = client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
         assert_eq!(idx, 1);
         assert_eq!(client.get_trial_count(&1u64), 1);
 
@@ -879,7 +1009,7 @@ mod tests {
         let idx = client.log_trial_offer(
             &scout,
             &1u64,
-            &String::from_str(&env, "QmTrialDetails1234567890"),
+            &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"),
         );
         assert_eq!(idx, 1);
         assert_eq!(client.get_trial_count(&1u64), 1);
@@ -918,7 +1048,7 @@ mod tests {
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
         client.subscribe(&scout, &SubscriptionTier::Elite);
 
-        client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmTTLTest"));
+        client.log_trial_offer(&scout, &1u64, &String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB"));
 
         env.ledger().with_mut(|l| {
             l.sequence_number = 100_000 + 1_000;
@@ -993,7 +1123,7 @@ mod tests {
         let (env, admin, xlm, _contract_id, client) = setup();
         let scout = Address::generate(&env);
         let player_id = 1u64;
-        let details_hash = String::from_str(&env, "QmTrialDetails");
+        let details_hash = String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB");
 
         let fees = default_fees();
 
@@ -1413,5 +1543,118 @@ mod tests {
         let scout = Address::generate(&env);
         let result = client.try_refund_subscription(&scout, &(-1i128));
         assert_eq!(result, Err(Ok(ScoutAccessError::InvalidInput)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Integration test: log_trial_offer advances player to EliteTier via the
+    // real progress contract cross-contract call.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_log_trial_offer_advances_player_to_elite_tier() {
+        use scoutchain_progress::ProgressContract;
+        use scoutchain_progress::ProgressContractClient;
+        use scoutchain_shared_types::ProgressLevel;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // --- deploy progress contract ---
+        let progress_id = env.register_contract(None, ProgressContract);
+        let progress_client = ProgressContractClient::new(&env, &progress_id);
+        let progress_admin = Address::generate(&env);
+        progress_client.initialize(&progress_admin);
+
+        // --- deploy scout_access contract ---
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let scout_access_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &scout_access_id);
+        client.initialize(&admin, &xlm, &default_fees());
+
+        // Wire scout_access → progress
+        client.set_progress_contract(&progress_id);
+
+        // Pre-advance the player to PerformanceMilestones (Level 2) so that
+        // log_trial_offer can push them to EliteTier (Level 3).
+        let player_id = 1u64;
+        let caller = Address::generate(&env);
+        progress_client.advance_level(&caller, &player_id, &1u32); // → VerifiedIdentity
+        progress_client.advance_level(&caller, &player_id, &2u32); // → PerformanceMilestones
+        assert_eq!(
+            progress_client.get_level(&player_id),
+            ProgressLevel::PerformanceMilestones
+        );
+
+        // Scout subscribes at Elite tier and logs a trial offer
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        let idx = client.log_trial_offer(
+            &scout,
+            &player_id,
+            &String::from_str(&env, "QmTrialOfferIntegration"),
+        );
+        assert_eq!(idx, 1);
+
+        // Player must now be at EliteTier
+        assert_eq!(
+            progress_client.get_level(&player_id),
+            ProgressLevel::EliteTier
+        );
+    }
+
+    #[test]
+    fn test_log_trial_offer_already_at_max_level_does_not_fail() {
+        use scoutchain_progress::ProgressContract;
+        use scoutchain_progress::ProgressContractClient;
+        use scoutchain_shared_types::ProgressLevel;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // --- deploy progress contract ---
+        let progress_id = env.register_contract(None, ProgressContract);
+        let progress_client = ProgressContractClient::new(&env, &progress_id);
+        let progress_admin = Address::generate(&env);
+        progress_client.initialize(&progress_admin);
+
+        // --- deploy scout_access contract ---
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let scout_access_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &scout_access_id);
+        client.initialize(&admin, &xlm, &default_fees());
+
+        // Wire scout_access → progress
+        client.set_progress_contract(&progress_id);
+
+        // Pre-advance the player all the way to EliteTier
+        let player_id = 2u64;
+        let caller = Address::generate(&env);
+        progress_client.advance_level(&caller, &player_id, &1u32); // → VerifiedIdentity
+        progress_client.advance_level(&caller, &player_id, &2u32); // → PerformanceMilestones
+        progress_client.advance_level(&caller, &player_id, &3u32); // → EliteTier
+        assert_eq!(
+            progress_client.get_level(&player_id),
+            ProgressLevel::EliteTier
+        );
+
+        // log_trial_offer must still succeed even though AlreadyAtMaxLevel is returned
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+        let result = client.try_log_trial_offer(
+            &scout,
+            &player_id,
+            &String::from_str(&env, "QmAlreadyMaxLevel"),
+        );
+        assert!(result.is_ok(), "AlreadyAtMaxLevel must not fail the trial offer");
+
+        // Player stays at EliteTier
+        assert_eq!(
+            progress_client.get_level(&player_id),
+            ProgressLevel::EliteTier
+        );
     }
 }
