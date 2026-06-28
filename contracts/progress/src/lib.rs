@@ -37,6 +37,25 @@ impl ProgressContract {
         Ok(())
     }
 
+    /// Store the verification contract address allowed to call `advance_level`.
+    /// When set, only that contract may authorize level advances (admin only).
+    pub fn set_verification_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::VerificationContract, &addr);
+        Ok(())
+    }
+
+    /// Store the registration contract address so we can sync player levels (admin only).
+    pub fn set_registration_contract(env: Env, addr: Address) -> Result<(), ProgressError> {
+        Self::require_admin(&env)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::RegistrationContract, &addr);
+        Ok(())
+    }
+
     pub fn pause_contract(env: Env) -> Result<(), ProgressError> {
         Self::bump_instance_ttl(&env);
         Self::require_admin(&env)?;
@@ -88,6 +107,19 @@ impl ProgressContract {
             .persistent()
             .set(&DataKey::PlayerLevel(player_id), &target_level);
 
+        // Sync to registration contract if set
+        if let Some(reg_contract) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::RegistrationContract)
+        {
+            let reg_client = registration_contract::Client::new(&env, &reg_contract);
+            match reg_client.try_set_player_level(&player_id, &target_level) {
+                Ok(Ok(())) => {}
+                _ => return Err(ProgressError::RegistrationCallFailed),
+            }
+        }
+
         events::player_level_reset(&env, player_id, &old_level, &target_level);
         Ok(())
     }
@@ -136,6 +168,19 @@ impl ProgressContract {
         env.storage()
             .persistent()
             .set(&DataKey::PlayerLevel(player_id), &new_level);
+
+        // Sync to registration contract if set
+        if let Some(reg_contract) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::RegistrationContract)
+        {
+            let reg_client = registration_contract::Client::new(&env, &reg_contract);
+            match reg_client.try_set_player_level(&player_id, &new_level) {
+                Ok(Ok(())) => {}
+                _ => return Err(ProgressError::RegistrationCallFailed),
+            }
+        }
 
         events::progress_updated(
             &env,
