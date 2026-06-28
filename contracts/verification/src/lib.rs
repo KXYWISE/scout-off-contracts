@@ -283,6 +283,16 @@ impl VerificationContract {
             return Err(VerificationError::ValidatorInactive);
         }
 
+        let vp_key = DataKey::ValidatorPlayerMilestoneCount(validator_wallet.clone(), player_id);
+        let vp_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&vp_key)
+            .unwrap_or(0u32);
+        if vp_count >= MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR {
+            return Err(VerificationError::MilestoneLimitExceeded);
+        }
+
         // Increment milestone counter for this player
         let counter_key = DataKey::MilestoneCounter(player_id);
         let index: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0u32);
@@ -310,7 +320,14 @@ impl VerificationContract {
         let val_count: u32 = env.storage().persistent().get(&val_key).unwrap_or(0u32);
         env.storage()
             .persistent()
-            .set(&val_key, &(val_count.checked_add(1).expect("overflow")));
+            .set(&val_key, &(val_count.checked_add(1).ok_or(VerificationError::Overflow)?));
+
+        env.storage().persistent().set(
+            &vp_key,
+            &(vp_count
+                .checked_add(1)
+                .ok_or(VerificationError::Overflow)?),
+        );
 
         // Increment global total milestone count
         let total: u32 = env
