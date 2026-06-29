@@ -3,7 +3,7 @@ mod events;
 mod types;
 
 use errors::ScoutAccessError;
-use types::{DataKey, Subscription, TrialOffer};
+use types::{DataKey, Subscription, TrialOffer, ProContactPeriod};
 pub use types::{FeeConfig, SubscriptionTier};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String};
@@ -301,7 +301,7 @@ impl ScoutAccessContract {
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
         scout.require_auth();
-        Self::require_active_subscription(&env, &scout)?;
+        let sub = Self::require_active_subscription(&env, &scout)?;
 
         let contact_key = DataKey::ContactRecord(player_id, scout.clone());
         if env.storage().persistent().has(&contact_key) {
@@ -309,6 +309,42 @@ impl ScoutAccessContract {
         }
 
         let config = Self::fee_config(&env);
+
+        // Pro-tier quota enforcement: limit contacts to pro_contact_limit per
+        // subscription period.  The counter resets automatically on renewal
+        // because a new period_start is stored when the scout subscribes again.
+        if sub.tier == SubscriptionTier::Pro {
+            let period_key = DataKey::ProContactCount(scout.clone());
+            let period: ProContactPeriod = env
+                .storage()
+                .persistent()
+                .get(&period_key)
+                .unwrap_or(ProContactPeriod {
+                    period_start: sub.subscribed_at,
+                    count: 0,
+                });
+            // If the stored period_start predates the current subscription,
+            // treat the counter as zero (subscription was renewed).
+            let current_count = if period.period_start == sub.subscribed_at {
+                period.count
+            } else {
+                0u32
+            };
+            if current_count >= config.pro_contact_limit {
+                return Err(ScoutAccessError::ProContactLimitReached);
+            }
+            let new_period = ProContactPeriod {
+                period_start: sub.subscribed_at,
+                count: current_count.checked_add(1).ok_or(ScoutAccessError::Overflow)?,
+            };
+            env.storage().persistent().set(&period_key, &new_period);
+            env.storage().persistent().extend_ttl(
+                &period_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
+        }
+
         Self::collect_fee(&env, &scout, config.contact_fee_stroops)?;
 
         env.storage().persistent().set(&contact_key, &true);
@@ -375,7 +411,7 @@ impl ScoutAccessContract {
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
         scout.require_auth();
-        Self::require_active_subscription(&env, &scout)?;
+        let sub = Self::require_active_subscription(&env, &scout)?;
 
         let config = Self::fee_config(&env);
         let mut new_contacts: u32 = 0;
@@ -396,6 +432,44 @@ impl ScoutAccessContract {
 
         if new_contacts == 0 {
             return Ok(0);
+        }
+
+        // Pro-tier quota enforcement for batches.
+        if sub.tier == SubscriptionTier::Pro {
+            let period_key = DataKey::ProContactCount(scout.clone());
+            let period: ProContactPeriod = env
+                .storage()
+                .persistent()
+                .get(&period_key)
+                .unwrap_or(ProContactPeriod {
+                    period_start: sub.subscribed_at,
+                    count: 0,
+                });
+            let current_count = if period.period_start == sub.subscribed_at {
+                period.count
+            } else {
+                0u32
+            };
+            let remaining = config.pro_contact_limit.saturating_sub(current_count);
+            if remaining == 0 {
+                return Err(ScoutAccessError::ProContactLimitReached);
+            }
+            // Cap the batch at the remaining quota rather than rejecting the whole call.
+            if new_contacts > remaining {
+                new_contacts = remaining;
+            }
+            let new_period = ProContactPeriod {
+                period_start: sub.subscribed_at,
+                count: current_count
+                    .checked_add(new_contacts)
+                    .ok_or(ScoutAccessError::Overflow)?,
+            };
+            env.storage().persistent().set(&period_key, &new_period);
+            env.storage().persistent().extend_ttl(
+                &period_key,
+                PERSISTENT_TTL_MIN,
+                PERSISTENT_TTL_MAX,
+            );
         }
 
         // Single token transfer for all new contacts combined.
@@ -875,6 +949,7 @@ impl ScoutAccessContract {
             || config.pro_sub_stroops <= 0
             || config.elite_sub_stroops <= 0
             || config.sub_duration_secs == 0
+            || config.pro_contact_limit == 0
         {
             return Err(ScoutAccessError::InvalidInput);
         }
@@ -917,6 +992,7 @@ mod tests {
             pro_sub_stroops: 3_000_000,
             elite_sub_stroops: 7_000_000,
             sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 10,
         }
     }
 
@@ -985,6 +1061,7 @@ mod tests {
             pro_sub_stroops: 5_000_000,
             elite_sub_stroops: 10_000_000,
             sub_duration_secs: 60 * 24 * 60 * 60,
+            pro_contact_limit: 20,
         };
 
         client.update_fee_config(&new_fees);
@@ -1182,6 +1259,134 @@ mod tests {
         assert_eq!(client.get_player_contacts(&2u64).len(), 1);
         // Player 3 was never contacted.
         assert_eq!(client.get_player_contacts(&3u64).len(), 0);
+    }
+
+    #[test]
+    fn test_pro_contact_limit_enforced() {
+        // Set pro_contact_limit to 3 so we can hit it cheaply in a test.
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let contract_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &contract_id);
+        let fees = FeeConfig {
+            contact_fee_stroops: 100_000,
+            basic_sub_stroops: 1_000_000,
+            pro_sub_stroops: 3_000_000,
+            elite_sub_stroops: 7_000_000,
+            sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 3,
+        };
+        client.initialize(&admin, &xlm, &fees);
+
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+
+        // First 3 contacts succeed.
+        client.pay_to_contact(&scout, &1u64);
+        client.pay_to_contact(&scout, &2u64);
+        client.pay_to_contact(&scout, &3u64);
+
+        // Fourth contact must be rejected with ProContactLimitReached (#19).
+        let res = client.try_pay_to_contact(&scout, &4u64);
+        assert_eq!(res, Err(Ok(ScoutAccessError::ProContactLimitReached)));
+    }
+
+    #[test]
+    fn test_pro_contact_limit_not_applied_to_elite() {
+        // Elite scouts are unlimited — they must not hit the Pro quota.
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let contract_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &contract_id);
+        let fees = FeeConfig {
+            contact_fee_stroops: 100_000,
+            basic_sub_stroops: 1_000_000,
+            pro_sub_stroops: 3_000_000,
+            elite_sub_stroops: 7_000_000,
+            sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 2, // very low cap — Elite must ignore this
+        };
+        client.initialize(&admin, &xlm, &fees);
+
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Elite);
+
+        // Elite scout can contact more than pro_contact_limit players.
+        for player_id in 1u64..=5u64 {
+            client.pay_to_contact(&scout, &player_id);
+        }
+        assert_eq!(client.get_scout_contacts(&scout).len(), 5);
+    }
+
+    #[test]
+    fn test_pro_contact_limit_resets_on_renewal() {
+        // After a Pro scout renews, the contact counter must reset to 0.
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let contract_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &contract_id);
+        let period_secs: u64 = 30 * 24 * 60 * 60;
+        let fees = FeeConfig {
+            contact_fee_stroops: 100_000,
+            basic_sub_stroops: 1_000_000,
+            pro_sub_stroops: 3_000_000,
+            elite_sub_stroops: 7_000_000,
+            sub_duration_secs: period_secs,
+            pro_contact_limit: 2,
+        };
+        client.initialize(&admin, &xlm, &fees);
+
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 200_000_000);
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+
+        // Exhaust the limit in period 1.
+        client.pay_to_contact(&scout, &1u64);
+        client.pay_to_contact(&scout, &2u64);
+        assert!(client.try_pay_to_contact(&scout, &3u64).is_err());
+
+        // Advance ledger past subscription + MIN_UPGRADE_INTERVAL so renewal is allowed.
+        env.ledger().with_mut(|l| {
+            l.timestamp += period_secs + 3_601;
+        });
+
+        // Renew subscription.
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+
+        // Counter should be reset — scout can contact new players again.
+        client.pay_to_contact(&scout, &3u64);
+        client.pay_to_contact(&scout, &4u64);
+        assert_eq!(client.try_pay_to_contact(&scout, &5u64),
+                   Err(Ok(ScoutAccessError::ProContactLimitReached)));
+    }
+
+    #[test]
+    fn test_validate_fee_config_rejects_zero_pro_contact_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let xlm = create_token(&env, &admin);
+        let contract_id = env.register_contract(None, ScoutAccessContract);
+        let client = ScoutAccessContractClient::new(&env, &contract_id);
+
+        let bad_fees = FeeConfig {
+            contact_fee_stroops: 100_000,
+            basic_sub_stroops: 1_000_000,
+            pro_sub_stroops: 3_000_000,
+            elite_sub_stroops: 7_000_000,
+            sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 0, // invalid — must be > 0
+        };
+        let res = client.try_initialize(&admin, &xlm, &bad_fees);
+        assert_eq!(res, Err(Ok(ScoutAccessError::InvalidInput)));
     }
 
     #[test]
@@ -1558,6 +1763,7 @@ mod tests {
             pro_sub_stroops: 5_000_000,
             elite_sub_stroops: 10_000_000,
             sub_duration_secs: 60 * 24 * 60 * 60,
+            pro_contact_limit: 20,
         };
         let result = client.try_update_fee_config(&new_fees);
         assert!(result.is_ok());

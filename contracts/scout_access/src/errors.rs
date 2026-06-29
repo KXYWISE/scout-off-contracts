@@ -38,4 +38,6 @@ pub enum ScoutAccessError {
     UpgradeTooSoon = 17,
     /// Scout sent a trial offer to the same player within the cooldown window
     TrialOfferRateLimited = 18,
+    /// Pro-tier scout has reached the contact limit for the current subscription period
+    ProContactLimitReached = 19,
 }
