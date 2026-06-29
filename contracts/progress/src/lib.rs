@@ -327,6 +327,38 @@ impl ProgressContract {
         entries
     }
 
+    /// Query history entries for a player since a given Unix timestamp.
+    /// Returns all entries where `updated_at >= since_timestamp`.
+    /// Uses the HistoryVec for O(1) lookup, filters in-memory.
+    pub fn get_history_since(
+        env: Env,
+        player_id: u64,
+        since_timestamp: u64,
+    ) -> Vec<ProgressEntry> {
+        let vec_key = DataKey::HistoryVec(player_id);
+        let history: Vec<ProgressEntry> = env
+            .storage()
+            .persistent()
+            .get(&vec_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if !history.is_empty() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&vec_key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+
+        let mut result: Vec<ProgressEntry> = Vec::new(&env);
+        for i in 0..history.len() {
+            if let Some(entry) = history.get(i) {
+                if entry.updated_at >= since_timestamp {
+                    result.push_back(entry);
+                }
+            }
+        }
+        result
+    }
+
     pub fn health(env: Env) -> ContractHealth {
         Self::bump_instance_ttl(&env);
         let initialized = env
