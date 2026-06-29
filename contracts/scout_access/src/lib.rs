@@ -1887,4 +1887,65 @@ assert_eq!(
         );
         assert!(result.is_ok());
     }
+
+    // -------------------------------------------------------------------------
+    // Issue #421: subscribe emits scout_subscribed event with correct payload
+    // -------------------------------------------------------------------------
+
+    /// Subscribes a scout to the Pro tier and verifies that exactly one
+    /// `scout_subscribed` event is emitted, containing the correct scout
+    /// address, tier, and that the subscription record carries the expected
+    /// expiry timestamp.
+    ///
+    /// The event topics are `(Symbol("scout_subscribed"), scout_address)` and
+    /// the event data is `(SubscriptionTier::Pro, fee_paid)`.  A regression
+    /// that removes the `events::scout_subscribed` call would cause this test
+    /// to fail because `env.events().all()` would be empty.
+    #[test]
+    fn test_subscribe_pro_emits_scout_subscribed_event() {
+        let (env, admin, xlm, contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 10_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+
+        // Collect only the events emitted by this contract.
+        let all_events = env.events().all().filter_by_contract(&contract_id);
+
+        // Exactly one event must be present after subscribe.
+        assert_eq!(
+            all_events.len(),
+            1,
+            "expected exactly one scout_subscribed event, got {}",
+            all_events.len()
+        );
+
+        // The event must be the scout_subscribed event with the correct topics and data.
+        assert_eq!(
+            all_events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (Symbol::new(&env, "scout_subscribed"), scout.clone()).into_val(&env),
+                    (SubscriptionTier::Pro, default_fees().pro_sub_stroops).into_val(&env)
+                )
+            ],
+            "scout_subscribed event payload mismatch"
+        );
+
+        // The subscription record must reflect the correct tier and a future expiry.
+        let sub = client.get_subscription(&scout);
+        assert_eq!(sub.tier, SubscriptionTier::Pro, "subscription tier mismatch");
+        assert_eq!(sub.scout, scout, "subscription scout address mismatch");
+        assert!(
+            sub.expires_at > sub.subscribed_at,
+            "expires_at must be after subscribed_at"
+        );
+        assert_eq!(
+            sub.expires_at,
+            sub.subscribed_at + default_fees().sub_duration_secs,
+            "expiry must equal subscribed_at + sub_duration_secs"
+        );
+    }
 }
