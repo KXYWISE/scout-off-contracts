@@ -408,9 +408,18 @@ impl RegistrationContract {
     }
 
     /// Filter players by region, position, and minimum progress level.
-    /// Uses the composite `PlayersByLevelRegion` index for level+region lookups,
-    /// so gas cost is proportional to matching results, not total player count.
-    /// Returns at most 50 results to bound gas usage.
+    ///
+    /// - Pass an empty string for `region` to match players in any region.
+    /// - Pass an empty string for `position` to match players in any position.
+    /// - `cursor` = 0 starts from the beginning; pass the returned `next_cursor`
+    ///   to fetch the next page.  `next_cursor` = 0 in the response means no
+    ///   further results.
+    /// - `limit` is capped at 50 internally.
+    ///
+    /// When `region` is non-empty the composite `PlayersByLevelRegion` index is
+    /// used so only matching buckets are loaded.  When `region` is empty the
+    /// function falls back to a full `PlayerIndex` scan filtered by level and
+    /// position.
     pub fn filter_players(
         env: Env,
         region: String,
@@ -421,8 +430,10 @@ impl RegistrationContract {
     ) -> Result<FilterResult, ScoutChainError> {
         Self::require_initialized(&env)?;
 
-        // Collect candidate player IDs from composite index buckets.
-        // We query every level bucket >= min_level for this region.
+        let max_results = (limit.min(50)) as usize;
+        let region_filter = region.len() > 0;
+        let position_filter = position.len() > 0;
+
         let levels: [ProgressLevel; 4] = [
             ProgressLevel::Unverified,
             ProgressLevel::VerifiedIdentity,
@@ -430,38 +441,72 @@ impl RegistrationContract {
             ProgressLevel::EliteTier,
         ];
 
-        let mut profiles = Vec::new(&env);
+        let mut results: Vec<PlayerProfile> = Vec::new(&env);
         let mut next_cursor: u64 = 0;
-        let mut past_cursor = cursor == 0; // cursor=0 means start from beginning
+        let mut past_cursor = cursor == 0; // cursor == 0 means start from beginning
 
-        for level in levels.iter() {
-            if !Self::level_gte(level, &min_level) {
-                continue;
+        if region_filter {
+            // Fast path: composite (level, region) index — only load matching buckets.
+            'outer: for level in levels.iter() {
+                if !Self::level_gte(level, &min_level) {
+                    continue;
+                }
+                let ids: Vec<u64> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::PlayersByLevelRegion(level.clone(), region.clone()))
+                    .unwrap_or_else(|| Vec::new(&env));
+
+                for player_id in ids.iter() {
+                    if !past_cursor {
+                        if player_id == cursor {
+                            past_cursor = true;
+                        }
+                        continue;
+                    }
+                    if results.len() >= max_results {
+                        next_cursor = player_id;
+                        break 'outer;
+                    }
+                    if let Ok(profile) = Self::load_player(&env, player_id) {
+                        if !position_filter || profile.vitals.position == position {
+                            results.push_back(profile);
+                        }
+                    }
+                }
             }
-            let ids: Vec<u64> = env
+        } else {
+            // Slow path: full PlayerIndex scan — needed when no region is specified.
+            let all_ids: Vec<u64> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::PlayersByLevelRegion(level.clone(), region.clone()))
+                .get(&DataKey::PlayerIndex)
                 .unwrap_or_else(|| Vec::new(&env));
 
-            for player_id in ids.iter() {
+            for player_id in all_ids.iter() {
+                if !past_cursor {
+                    if player_id == cursor {
+                        past_cursor = true;
+                    }
+                    continue;
+                }
                 if results.len() >= max_results {
+                    next_cursor = player_id;
                     break;
                 }
                 if let Ok(profile) = Self::load_player(&env, player_id) {
-                    if profile.vitals.position == position {
+                    if !Self::level_gte(&profile.level, &min_level) {
+                        continue;
+                    }
+                    if !position_filter || profile.vitals.position == position {
                         results.push_back(profile);
                     }
                 }
             }
-
-            if results.len() >= max_results {
-                break;
-            }
         }
 
         Ok(FilterResult {
-            profiles,
+            profiles: results,
             next_cursor,
         })
     }
@@ -1209,6 +1254,113 @@ fn test_upgrade_preserves_admin() {
         // (player 5 + skip midfielder + players 7,8,9) → 4 matches
         assert_eq!(page2.profiles.len(), 4);
         assert_eq!(page2.next_cursor, 0, "should be no more pages");
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #418: filter_players with position filter only (empty region)
+    // -------------------------------------------------------------------------
+
+    /// Register three players with distinct positions across different regions.
+    /// Call filter_players with only the position set (empty region) and assert
+    /// exactly the goalkeeper is returned.
+    #[test]
+    fn test_filter_players_position_only_returns_correct_player() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        // Player 1: Goalkeeper in West Africa
+        let wallet1 = Address::generate(&env);
+        let vitals1 = PlayerVitals {
+            age: 19,
+            position: String::from_str(&env, "Goalkeeper"),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        let id_gk = client.register_player(&wallet1, &vitals1, &hashes);
+
+        // Player 2: Midfielder in South America
+        let wallet2 = Address::generate(&env);
+        let vitals2 = PlayerVitals {
+            age: 22,
+            position: String::from_str(&env, "Midfielder"),
+            region: String::from_str(&env, "South America"),
+            nationality: String::from_str(&env, "Brazil"),
+        };
+        client.register_player(&wallet2, &vitals2, &hashes);
+
+        // Player 3: Forward in Europe
+        let wallet3 = Address::generate(&env);
+        let vitals3 = PlayerVitals {
+            age: 20,
+            position: String::from_str(&env, "Forward"),
+            region: String::from_str(&env, "Europe"),
+            nationality: String::from_str(&env, "France"),
+        };
+        client.register_player(&wallet3, &vitals3, &hashes);
+
+        // Filter: position = Goalkeeper, no region constraint (empty string)
+        let result = client.filter_players(
+            &String::from_str(&env, ""),           // no region filter
+            &String::from_str(&env, "Goalkeeper"), // position filter only
+            &ProgressLevel::Unverified,
+            &0u64,
+            &20u32,
+        );
+
+        assert_eq!(result.profiles.len(), 1, "exactly one goalkeeper expected");
+        assert_eq!(
+            result.profiles.get(0).unwrap().player_id,
+            id_gk,
+            "returned player must be the goalkeeper"
+        );
+        assert_eq!(
+            result.profiles.get(0).unwrap().vitals.position,
+            String::from_str(&env, "Goalkeeper")
+        );
+        assert_eq!(result.next_cursor, 0); // no more pages
+    }
+
+    /// Non-matching position with empty region returns an empty result.
+    #[test]
+    fn test_filter_players_position_only_no_match_returns_empty() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        // Register two players — neither is a Defender
+        let wallet1 = Address::generate(&env);
+        let vitals1 = PlayerVitals {
+            age: 18,
+            position: String::from_str(&env, "Forward"),
+            region: String::from_str(&env, "West Africa"),
+            nationality: String::from_str(&env, "Nigeria"),
+        };
+        client.register_player(&wallet1, &vitals1, &hashes);
+
+        let wallet2 = Address::generate(&env);
+        let vitals2 = PlayerVitals {
+            age: 21,
+            position: String::from_str(&env, "Midfielder"),
+            region: String::from_str(&env, "Europe"),
+            nationality: String::from_str(&env, "Spain"),
+        };
+        client.register_player(&wallet2, &vitals2, &hashes);
+
+        let result = client.filter_players(
+            &String::from_str(&env, ""),         // no region
+            &String::from_str(&env, "Defender"), // no one has this position
+            &ProgressLevel::Unverified,
+            &0u64,
+            &20u32,
+        );
+
+        assert_eq!(result.profiles.len(), 0, "no defenders registered — result must be empty");
+        assert_eq!(result.next_cursor, 0);
     }
 
     // -------------------------------------------------------------------------
