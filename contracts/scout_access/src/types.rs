@@ -33,6 +33,20 @@ pub struct TrialOffer {
     pub logged_at: u64,
 }
 
+/// Tracks the number of contacts a Pro-tier scout has made in their current
+/// subscription period.  `period_start` is the `subscribed_at` timestamp of
+/// the current subscription; when the scout renews, a new record is stored
+/// (keyed by the new `subscribed_at`), effectively resetting the counter.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProContactPeriod {
+    /// `subscribed_at` of the subscription this counter belongs to.
+    /// Used to detect period rollovers on subscription renewal.
+    pub period_start: u64,
+    /// Number of contacts made in this period.
+    pub count: u32,
+}
+
 /// Platform fee configuration
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -47,6 +61,10 @@ pub struct FeeConfig {
     pub elite_sub_stroops: i128,
     /// Subscription duration in seconds (default: 30 days)
     pub sub_duration_secs: u64,
+    /// Maximum number of players a Pro-tier scout may contact within one
+    /// subscription period.  Set to 0 to disable the cap (not recommended).
+    /// Elite tier is always unlimited and ignores this field.
+    pub pro_contact_limit: u32,
 }
 
 #[contracttype]
@@ -70,6 +88,12 @@ pub enum DataKey {
     ProgressContract,
     /// scout → Vec<u64> of contacted player_ids
     ScoutContacts(Address),
+    /// player_id → Vec<Address> of scouts who have contacted this player
+    PlayerContacts(u64),
+    /// Pro-tier scout → (period_start: u64, count: u32)
+    /// Tracks how many contacts a Pro scout has made in the current subscription
+    /// period.  Resets automatically when the scout renews their subscription.
+    ProContactCount(Address),
     /// (scout, player_id) → u64 timestamp of the last trial offer sent
     /// Used to enforce the per-(scout, player) cooldown window.
     TrialOfferLastSent(Address, u64),
