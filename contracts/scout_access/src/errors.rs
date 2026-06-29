@@ -36,4 +36,6 @@ pub enum ScoutAccessError {
     NoFeesToWithdraw = 16,
     /// Scout attempted to upgrade/renew before the minimum interval elapsed
     UpgradeTooSoon = 17,
+    /// Pro tier scout has exceeded monthly contact limit
+    ContactQuotaExceeded = 18,
 }
