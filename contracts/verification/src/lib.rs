@@ -50,32 +50,6 @@ mod progress_contract {
     soroban_sdk::contractimport!(
         file = "fixtures/scoutchain_progress.wasm"
     );
-    use scoutchain_shared_types::ProgressLevel;
-    use soroban_sdk::{contractclient, contracterror, Address, Env};
-
-    #[contracterror]
-    #[derive(Copy, Clone, Debug, PartialEq)]
-    #[repr(u32)]
-    pub enum Error {
-        AlreadyInitialized = 1,
-        NotInitialized = 2,
-        ContractPaused = 3,
-        Unauthorized = 4,
-        InvalidProgressTransition = 5,
-        AlreadyAtMaxLevel = 6,
-        PlayerNotFound = 7,
-    }
-
-    #[contractclient(name = "Client")]
-    #[allow(dead_code)]
-    pub trait ProgressContractClient {
-        fn advance_level(
-            env: Env,
-            caller: Address,
-            player_id: u64,
-            milestone_ref: u32,
-        ) -> Result<ProgressLevel, Error>;
-    }
 }
 
 #[contract]
@@ -389,7 +363,7 @@ impl VerificationContract {
             // Any other error propagates as ProgressCallFailed.
             match progress_client.try_advance_level(&validator_wallet, &player_id, &next_index) {
                 Ok(_) => {}
-                Err(Ok(progress_contract::Error::AlreadyAtMaxLevel)) => {}
+                Err(Ok(progress_contract::ProgressError::AlreadyAtMaxLevel)) => {}
                 Err(_) => return Err(VerificationError::ProgressCallFailed),
             }
         }
@@ -843,6 +817,23 @@ mod tests {
 
     #[test]
     fn test_upgrade_preserves_admin() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "Coach"));
+
+        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
+        client.upgrade(&new_wasm_hash);
+
+        // Admin persisted — admin-gated call still works after upgrade
+        let reason: Option<String> = None;
+        client.revoke_validator(&validator, &reason);
+        assert!(!client.is_active_validator(&validator));
+    }
+
+    #[test]
     fn test_pause_unpause_events() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
@@ -948,14 +939,6 @@ mod tests {
         client.initialize(&admin);
 
         let validator = Address::generate(&env);
-        client.register_validator(&validator, &String::from_str(&env, "Coach"));
-
-        let new_wasm_hash = env.deployer().upload_contract_wasm(soroban_sdk::Bytes::new(&env));
-        client.upgrade(&new_wasm_hash);
-
-        // Admin persisted — admin-gated call still works
-        client.revoke_validator(&validator);
-        assert!(!client.is_active_validator(&validator));
         // 257 ASCII bytes — must exceed the 256-byte limit
         let too_long = "a".repeat(257);
         client.register_validator(&validator, &String::from_str(&env, &too_long));
@@ -1307,5 +1290,54 @@ mod tests {
         // Assert counters are unchanged.
         assert_eq!(client.get_milestone_count(&player_id), milestone_count_before);
         assert_eq!(client.get_validator_milestone_count(&validator), validator_count_before);
+    }
+
+    // -------------------------------------------------------------------------
+    // Zero-count path: get_validator_milestone_count returns 0 with no panic
+    // Covers the unwrap_or(0) default for both unknown and registered-but-idle
+    // validator addresses. A regression that removes the default would panic on
+    // these calls, making them a reliable canary for that change.
+    // -------------------------------------------------------------------------
+
+    /// Isolated test: completely unknown address returns 0.
+    ///
+    /// The queried address has never been registered as a validator, never
+    /// approved a milestone, and has never interacted with the contract in any
+    /// way. The storage key `ValidatorMilestoneCount(wallet)` therefore does not
+    /// exist, so `get_validator_milestone_count` must return the `unwrap_or(0)`
+    /// default without panicking.
+    #[test]
+    fn test_get_validator_milestone_count_unknown_address_returns_zero() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Generate a fresh address that has never appeared anywhere in this test.
+        let unknown = Address::generate(&env);
+
+        // Must return 0 with no panic — the storage key is absent.
+        assert_eq!(client.get_validator_milestone_count(&unknown), 0);
+    }
+
+    /// Isolated test: registered validator with no approvals returns 0.
+    ///
+    /// The address is registered via `register_validator`, so a `Validator`
+    /// record exists in storage, but `approve_milestone` is never called.
+    /// The `ValidatorMilestoneCount` key is therefore absent, and
+    /// `get_validator_milestone_count` must still return 0 without panicking.
+    #[test]
+    fn test_get_validator_milestone_count_registered_but_no_approvals_returns_zero() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"));
+
+        // Validator is active but has approved zero milestones.
+        assert!(client.is_active_validator(&validator));
+
+        // Must return 0 — ValidatorMilestoneCount key was never written.
+        assert_eq!(client.get_validator_milestone_count(&validator), 0);
     }
 }
