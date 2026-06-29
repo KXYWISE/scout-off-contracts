@@ -17,7 +17,7 @@ mod events;
 mod types;
 
 use errors::VerificationError;
-use types::{ContractHealth, DataKey, Milestone, Validator, ValidatorStatus};
+use types::{ContractHealth, DataKey, Milestone, MilestoneRef, Validator, ValidatorStatus};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
@@ -41,6 +41,9 @@ const ADMIN_BUMP_LEDGERS: u32 = 2_000;
 
 // Maximum milestones one validator may approve for a single player.
 const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
+
+// Maximum entries in the per-validator milestone index.
+const MAX_VALIDATOR_MILESTONE_INDEX: u32 = 500;
 
 // Generated client for the progress contract — used for cross-contract calls.
 // The progress contract must be deployed and its address registered via
@@ -366,6 +369,21 @@ impl VerificationContract {
             .instance()
             .set(&DataKey::TotalMilestoneCount, &(total.checked_add(1).ok_or(VerificationError::Overflow)?));
 
+        // Update per-validator milestone index
+        let vm_key = DataKey::ValidatorMilestones(validator_wallet.clone());
+        let mut vm_list: Vec<MilestoneRef> = env
+            .storage()
+            .persistent()
+            .get(&vm_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        if vm_list.len() < MAX_VALIDATOR_MILESTONE_INDEX {
+            vm_list.push_back(MilestoneRef {
+                player_id,
+                milestone_index: next_index,
+            });
+            env.storage().persistent().set(&vm_key, &vm_list);
+        }
+
         events::milestone_approved(
             &env,
             player_id,
@@ -443,6 +461,21 @@ impl VerificationContract {
             .persistent()
             .get(&DataKey::Validator(wallet))
             .ok_or(VerificationError::ValidatorNotFound)
+    }
+
+    pub fn get_validator_milestones(env: Env, wallet: Address) -> Vec<MilestoneRef> {
+        let key = DataKey::ValidatorMilestones(wallet);
+        let list: Vec<MilestoneRef> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !list.is_empty() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        }
+        list
     }
 
     /// Returns the detailed status of a validator wallet.

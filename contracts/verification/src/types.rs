@@ -35,6 +35,14 @@ pub struct Validator {
     pub active: bool,
 }
 
+/// Reference to a milestone approved by a validator: (player_id, milestone_index)
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MilestoneRef {
+    pub player_id: u64,
+    pub milestone_index: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -50,4 +58,7 @@ pub enum DataKey {
     ProgressContract,
     ValidatorVector,
     TotalMilestoneCount,
+    ValidatorPlayerMilestoneCount(Address, u64),
+    /// validator → Vec<MilestoneRef> of milestones approved by this validator
+    ValidatorMilestones(Address),
 }
