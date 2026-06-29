@@ -1557,4 +1557,178 @@ fn test_upgrade_preserves_admin() {
         assert_eq!(profile.wallet, wallet);
         assert_eq!(profile.level, ProgressLevel::Unverified);
     }
+
+    // -------------------------------------------------------------------------
+    // Issue #420: combined filter (position AND region AND min_level)
+    // -------------------------------------------------------------------------
+
+    /// Register players covering all combinations of two positions, two regions,
+    /// and two levels, then assert that a combined filter returns exactly the one
+    /// player that matches all three criteria simultaneously.
+    ///
+    /// Matrix (8 players total):
+    ///   positions : Forward, Midfielder
+    ///   regions   : West Africa, Europe
+    ///   levels    : Unverified (0), VerifiedIdentity (1)
+    ///
+    /// Target player: Forward × West Africa × VerifiedIdentity → player_id = 1
+    #[test]
+    fn test_filter_players_combined_position_region_level() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Register a fake progress contract address so set_player_level is
+        // callable (mock_all_auths bypasses the require_auth check).
+        let progress_addr = Address::generate(&env);
+        client.set_progress_contract(&progress_addr);
+
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        // ------------------------------------------------------------------ //
+        // Register all 8 players (2 positions × 2 regions × 2 levels).
+        // The "level" dimension is set after registration via set_player_level.
+        // ------------------------------------------------------------------ //
+
+        // Slot 1 — Forward, West Africa, will be elevated to VerifiedIdentity (TARGET)
+        let wallet_fwa_v = Address::generate(&env);
+        let id_fwa_v = client.register_player(
+            &wallet_fwa_v,
+            &PlayerVitals {
+                age: 18,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Ghana"),
+            },
+            &hashes,
+        );
+
+        // Slot 2 — Forward, West Africa, stays Unverified
+        let wallet_fwa_u = Address::generate(&env);
+        let id_fwa_u = client.register_player(
+            &wallet_fwa_u,
+            &PlayerVitals {
+                age: 19,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Ghana"),
+            },
+            &hashes,
+        );
+
+        // Slot 3 — Midfielder, West Africa, will be elevated to VerifiedIdentity
+        let wallet_mwa_v = Address::generate(&env);
+        let id_mwa_v = client.register_player(
+            &wallet_mwa_v,
+            &PlayerVitals {
+                age: 20,
+                position: String::from_str(&env, "Midfielder"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Nigeria"),
+            },
+            &hashes,
+        );
+
+        // Slot 4 — Midfielder, West Africa, stays Unverified
+        let wallet_mwa_u = Address::generate(&env);
+        let id_mwa_u = client.register_player(
+            &wallet_mwa_u,
+            &PlayerVitals {
+                age: 21,
+                position: String::from_str(&env, "Midfielder"),
+                region: String::from_str(&env, "West Africa"),
+                nationality: String::from_str(&env, "Nigeria"),
+            },
+            &hashes,
+        );
+
+        // Slot 5 — Forward, Europe, will be elevated to VerifiedIdentity
+        let wallet_feu_v = Address::generate(&env);
+        let id_feu_v = client.register_player(
+            &wallet_feu_v,
+            &PlayerVitals {
+                age: 22,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "Europe"),
+                nationality: String::from_str(&env, "France"),
+            },
+            &hashes,
+        );
+
+        // Slot 6 — Forward, Europe, stays Unverified
+        let wallet_feu_u = Address::generate(&env);
+        let id_feu_u = client.register_player(
+            &wallet_feu_u,
+            &PlayerVitals {
+                age: 23,
+                position: String::from_str(&env, "Forward"),
+                region: String::from_str(&env, "Europe"),
+                nationality: String::from_str(&env, "France"),
+            },
+            &hashes,
+        );
+
+        // Slot 7 — Midfielder, Europe, will be elevated to VerifiedIdentity
+        let wallet_meu_v = Address::generate(&env);
+        let id_meu_v = client.register_player(
+            &wallet_meu_v,
+            &PlayerVitals {
+                age: 24,
+                position: String::from_str(&env, "Midfielder"),
+                region: String::from_str(&env, "Europe"),
+                nationality: String::from_str(&env, "Germany"),
+            },
+            &hashes,
+        );
+
+        // Slot 8 — Midfielder, Europe, stays Unverified
+        let wallet_meu_u = Address::generate(&env);
+        let id_meu_u = client.register_player(
+            &wallet_meu_u,
+            &PlayerVitals {
+                age: 25,
+                position: String::from_str(&env, "Midfielder"),
+                region: String::from_str(&env, "Europe"),
+                nationality: String::from_str(&env, "Germany"),
+            },
+            &hashes,
+        );
+
+        // Elevate four players to VerifiedIdentity (slots 1, 3, 5, 7)
+        client.set_player_level(&id_fwa_v, &ProgressLevel::VerifiedIdentity);
+        client.set_player_level(&id_mwa_v, &ProgressLevel::VerifiedIdentity);
+        client.set_player_level(&id_feu_v, &ProgressLevel::VerifiedIdentity);
+        client.set_player_level(&id_meu_v, &ProgressLevel::VerifiedIdentity);
+
+        // ------------------------------------------------------------------ //
+        // Query: Forward AND West Africa AND min_level = VerifiedIdentity
+        // Only player id_fwa_v matches all three criteria simultaneously.
+        // ------------------------------------------------------------------ //
+        let result = client.filter_players(
+            &String::from_str(&env, "West Africa"),
+            &String::from_str(&env, "Forward"),
+            &ProgressLevel::VerifiedIdentity,
+            &0u64,
+            &50u32,
+        );
+
+        // Exactly one player must be returned.
+        assert_eq!(result.profiles.len(), 1, "expected exactly one matching player");
+
+        // That player must be the Forward in West Africa at VerifiedIdentity.
+        let returned_id = result.profiles.get(0).unwrap().player_id;
+        assert_eq!(returned_id, id_fwa_v, "wrong player_id returned");
+
+        // Partial-match players must NOT appear in the result.
+        // (same region + position but wrong level)
+        let returned_ids: soroban_sdk::Vec<u64> = result
+            .profiles
+            .iter()
+            .map(|p| p.player_id)
+            .collect::<soroban_sdk::Vec<u64>>();
+
+        assert!(!returned_ids.contains(&id_fwa_u), "unverified Forward/WA must not appear");
+        assert!(!returned_ids.contains(&id_mwa_v), "Midfielder/WA/verified must not appear");
+        assert!(!returned_ids.contains(&id_feu_v), "Forward/Europe/verified must not appear");
+    }
 }
