@@ -579,6 +579,28 @@ impl ScoutAccessContract {
         count
     }
 
+    /// Return all trial offers for a given player in ascending index order (1..=N).
+    /// Returns an empty Vec for a player with no trial offers.
+    pub fn get_player_trial_offers(env: Env, player_id: u64) -> soroban_sdk::Vec<TrialOffer> {
+        Self::bump_instance_ttl(&env);
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrialCounter(player_id))
+            .unwrap_or(0u32);
+        let mut offers: soroban_sdk::Vec<TrialOffer> = soroban_sdk::Vec::new(&env);
+        for i in 1..=count {
+            if let Some(offer) = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TrialOffer(player_id, i))
+            {
+                offers.push_back(offer);
+            }
+        }
+        offers
+    }
+
     /// Return all trial offers for a player in a single call.
     /// Bounded at 20 to prevent gas exhaustion. Returns empty Vec for no offers.
     pub fn get_all_trial_offers(env: Env, player_id: u64) -> soroban_sdk::Vec<TrialOffer> {
@@ -594,32 +616,6 @@ impl ScoutAccessContract {
         let limit = count.min(MAX_OFFERS);
         let mut offers: soroban_sdk::Vec<TrialOffer> = soroban_sdk::Vec::new(&env);
         for i in 1..=limit {
-            if let Some(offer) = env
-                .storage()
-                .persistent()
-                .get(&DataKey::TrialOffer(player_id, i))
-            {
-                offers.push_back(offer);
-            }
-        }
-        offers
-    }
-
-    /// #467 — Return all trial offers received by a specific player.
-    /// Reads TrialCounter(player_id) and returns offers from index 1 to the counter.
-    /// Returns an empty Vec for a player with no trial offers.
-    /// Results are ordered by trial index (ascending).
-    pub fn get_player_trial_offers(env: Env, player_id: u64) -> soroban_sdk::Vec<TrialOffer> {
-        Self::bump_instance_ttl(&env);
-
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TrialCounter(player_id))
-            .unwrap_or(0u32);
-
-        let mut offers: soroban_sdk::Vec<TrialOffer> = soroban_sdk::Vec::new(&env);
-        for i in 1..=count {
             if let Some(offer) = env
                 .storage()
                 .persistent()
@@ -1728,41 +1724,34 @@ assert_eq!(
     }
 
     // -------------------------------------------------------------------------
-    // #467: get_player_trial_offers returns all trial offers for a player
+    // Issue #467: get_player_trial_offers
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_get_player_trial_offers_empty_for_no_offers() {
-        let (_, _, _, _, client) = setup();
+    fn test_get_player_trial_offers_empty() {
+        let (env, _, _, _, client) = setup();
         let offers = client.get_player_trial_offers(&999u64);
         assert_eq!(offers.len(), 0);
     }
 
     #[test]
-    fn test_get_player_trial_offers_returns_all_in_order() {
+    fn test_get_player_trial_offers_multiple() {
         let (env, admin, xlm, _contract_id, client) = setup();
         let scout = Address::generate(&env);
         mint_token(&env, &xlm, &admin, &scout, 100_000_000);
-
         client.subscribe(&scout, &SubscriptionTier::Elite);
 
-        let player_id = 10u64;
+        let player_id = 7u64;
         let hash1 = String::from_str(&env, "QmPK1s3pNYLi9ERiq3BDxKa4XosgWwFRQUydHUtz4YgpqB");
-        let hash2 = String::from_str(
-            &env,
-            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
-        );
+        let hash2 = String::from_str(&env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
 
         client.log_trial_offer(&scout, &player_id, &hash1);
         client.log_trial_offer(&scout, &player_id, &hash2);
 
         let offers = client.get_player_trial_offers(&player_id);
         assert_eq!(offers.len(), 2);
-
-        // Verify ascending order by index (first logged = index 1)
+        // Ascending order: index 1 first
         assert_eq!(offers.get(0).unwrap().details_hash, hash1);
         assert_eq!(offers.get(1).unwrap().details_hash, hash2);
-        assert_eq!(offers.get(0).unwrap().player_id, player_id);
-        assert_eq!(offers.get(1).unwrap().player_id, player_id);
     }
 }

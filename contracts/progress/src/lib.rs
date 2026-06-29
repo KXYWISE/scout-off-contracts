@@ -913,4 +913,33 @@ mod tests {
         let result = client.try_advance_level(&validator, &player_id, &4u32);
         assert_eq!(result, Err(Ok(ProgressError::AlreadyAtMaxLevel)));
     }
+
+    // -------------------------------------------------------------------------
+    // Issue #447: HistoryEntry TTL is bumped after write
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_history_entry_ttl_bumped_after_write() {
+        use soroban_sdk::testutils::Ledger;
+
+        let (env, client, validator) = setup();
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100;
+            l.min_persistent_entry_ttl = 500;
+            l.max_entry_ttl = 600_000;
+        });
+
+        let player_id = 55u64;
+        client.advance_level(&validator, &player_id, &1u32);
+
+        // Advance ledger well past default TTL
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100 + 2_500;
+        });
+
+        // Entry must still be readable — TTL was extended on write
+        let entry = client.get_history_entry(&player_id, &1u32);
+        assert_eq!(entry.old_level, ProgressLevel::Unverified);
+        assert_eq!(entry.new_level, ProgressLevel::VerifiedIdentity);
+    }
 }

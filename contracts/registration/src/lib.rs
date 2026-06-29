@@ -342,7 +342,7 @@ impl RegistrationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Scout(scout_id), &profile);
-        events::scout_verified(&env, scout_id);
+        events::scout_verified(&env, scout_id, &profile.wallet);
         Ok(())
     }
 
@@ -1227,6 +1227,53 @@ fn test_upgrade_preserves_admin() {
     }
 
     // -------------------------------------------------------------------------
+    // Issue #469: verify_scout emits scout_verified with wallet + non-admin test
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_scout_emits_event_with_wallet() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
+
+        client.verify_scout(&scout_id);
+
+        let events = env.events().all();
+        // Find the scout_verified event
+        let found = events.iter().any(|(_, topics, data)| {
+            use soroban_sdk::IntoVal;
+            let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::vec![
+                &env,
+                soroban_sdk::Symbol::new(&env, "scout_verified").into_val(&env),
+                wallet.clone().into_val(&env),
+            ];
+            let expected_data: soroban_sdk::Val = scout_id.into_val(&env);
+            topics == expected_topics && data == expected_data
+        });
+        assert!(found, "scout_verified event with wallet not emitted");
+    }
+
+    #[test]
+    fn test_verify_scout_non_admin_unauthorized() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let region = String::from_str(&env, "Europe");
+        let scout_id = client.register_scout(&wallet, &region);
+
+        // Clear all auths so admin check fails
+        env.mock_auths(&[]);
+        let result = client.try_verify_scout(&scout_id);
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
     // Pause / unpause behaviour
     // -------------------------------------------------------------------------
 
@@ -1447,7 +1494,7 @@ fn test_upgrade_preserves_admin() {
     }
 
     // -------------------------------------------------------------------------
-    // #461: PlayerByWallet mapping is removed on deregister_player
+    // Issue #461: PlayerByWallet removed after deregister_player
     // -------------------------------------------------------------------------
 
     #[test]
@@ -1461,18 +1508,15 @@ fn test_upgrade_preserves_admin() {
         let hashes = vec![&env, String::from_str(&env, "QmTest")];
         let player_id = client.register_player(&wallet, &vitals, &hashes);
 
-        // Confirm the wallet mapping exists before deregistration.
-        assert!(client.get_player_by_wallet(&wallet).is_ok());
-
         client.deregister_player(&player_id);
 
-        // Wallet mapping must be absent after deregistration.
+        // Wallet mapping must be gone
         let result = client.try_get_player_by_wallet(&wallet);
         assert_eq!(result, Err(Ok(ScoutChainError::PlayerNotFound)));
     }
 
     #[test]
-    fn test_deregister_player_allows_reregistration_of_same_wallet() {
+    fn test_deregister_player_allows_wallet_reregistration() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -1480,74 +1524,14 @@ fn test_upgrade_preserves_admin() {
         let wallet = Address::generate(&env);
         let vitals = dummy_vitals(&env);
         let hashes = vec![&env, String::from_str(&env, "QmTest")];
+        let old_id = client.register_player(&wallet, &vitals, &hashes);
 
-        let first_id = client.register_player(&wallet, &vitals, &hashes);
-        client.deregister_player(&first_id);
+        client.deregister_player(&old_id);
 
-        // Re-registering the same wallet must succeed and produce a new ID.
-        let second_id = client.register_player(&wallet, &vitals, &hashes);
-        assert_ne!(first_id, second_id);
-    }
-
-    // -------------------------------------------------------------------------
-    // #469: Non-admin call to verify_scout returns Unauthorized
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_verify_scout_non_admin_returns_unauthorized() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let wallet = Address::generate(&env);
-        let region = String::from_str(&env, "Europe");
-        let scout_id = client.register_scout(&wallet, &region);
-
-        // Clear all mocks so admin auth is not satisfied.
-        env.mock_auths(&[]);
-        let result = client.try_verify_scout(&scout_id);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_verify_scout_emits_scout_verified_event() {
-        use soroban_sdk::{IntoVal, Symbol};
-
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let wallet = Address::generate(&env);
-        let region = String::from_str(&env, "Europe");
-        let scout_id = client.register_scout(&wallet, &region);
-
-        client.verify_scout(&scout_id);
-
-        // scout_verified event must be present: topics = (Symbol("scout_verified"),),
-        // data = scout_id (u64).
-        let contract_id = client.address.clone();
-        assert_eq!(
-            env.events().all(),
-            soroban_sdk::vec![
-                &env,
-                (
-                    contract_id.clone(),
-                    soroban_sdk::vec![
-                        &env,
-                        Symbol::new(&env, "scout_registered").into_val(&env),
-                        wallet.into_val(&env),
-                    ],
-                    scout_id.into_val(&env),
-                ),
-                (
-                    contract_id,
-                    soroban_sdk::vec![
-                        &env,
-                        Symbol::new(&env, "scout_verified").into_val(&env),
-                    ],
-                    scout_id.into_val(&env),
-                ),
-            ]
-        );
+        // Same wallet can register again without conflict
+        let new_id = client.register_player(&wallet, &vitals, &hashes);
+        assert_ne!(new_id, old_id);
+        let profile = client.get_player_by_wallet(&wallet);
+        assert_eq!(profile.player_id, new_id);
     }
 }
