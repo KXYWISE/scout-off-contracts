@@ -19,6 +19,8 @@ pub enum VerificationError {
     Overflow = 13,
     MilestoneNotFound = 14,
     ValidatorCapReached = 15,
+    DuplicateEvidence = 16,
+    MilestoneLimitExceeded = 17,
 }
 
 #[test]
