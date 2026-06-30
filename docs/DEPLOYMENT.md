@@ -70,7 +70,12 @@ chmod +x scripts/deploy.sh
 ```bash
 chmod +x scripts/initialize.sh
 ./scripts/initialize.sh testnet
-# Sets admin, fee config, and wires verification → progress cross-contract link
+# Sets admin, fee config, and wires all cross-contract links:
+# - Verification → Progress: verification.set_progress_contract
+# - Registration ← Progress: registration.set_progress_contract
+# - Progress → Verification: progress.set_verification_contract
+# - Progress → Registration: progress.set_registration_contract
+# - Scout Access → Progress: scout_access.set_progress_contract
 ```
 
 ### 4. Generate TypeScript bindings
@@ -106,10 +111,88 @@ psql $DATABASE_URL -f migrations/001_initial_schema.sql
 - [ ] Verify all contract IDs in `.env.contracts`
 - [ ] Regenerate bindings: `./scripts/generate-bindings.sh mainnet`
 
+## Upgrading a Deployed Contract
+
+All four contracts expose an `upgrade(new_wasm_hash)` function (admin auth required). The admin address is stored in **persistent** storage so it survives the WASM swap.
+
+Instance storage (Initialized, Paused, counters, fee config) is **not** automatically carried over. You must re-apply it after the upgrade if those values need to be preserved.
+
+### Upgrade procedure
+
+**Step 1 — Read current instance state** (before upgrading)
+
+```bash
+# Save values you need to restore
+stellar contract invoke --id $CONTRACT_ID -- get_fee_config   # scout_access only
+```
+
+**Step 2 — Build and upload the new WASM**
+
+```bash
+stellar contract build
+stellar contract install \
+  --source $DEPLOYER_SECRET \
+  --network testnet \
+  --wasm target/wasm32v1-none/release/<contract_name>.wasm
+# Prints the new wasm hash: <NEW_WASM_HASH>
+```
+
+**Step 3 — Call `upgrade`** (must be called by the admin address)
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source $ADMIN_ADDRESS \
+  --network testnet \
+  -- upgrade \
+  --new_wasm_hash <NEW_WASM_HASH>
+```
+
+**Step 4 — Re-apply instance state** (if needed)
+
+For `scout_access`, restore fee config:
+
+```bash
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  --source $ADMIN_ADDRESS --network testnet \
+  -- update_fee_config --fee_config '...'
+```
+
+For `verification`, re-wire the progress contract link:
+
+```bash
+stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
+  --source $ADMIN_ADDRESS --network testnet \
+  -- set_progress_contract \
+  --progress_contract $PROGRESS_CONTRACT_ID
+```
+
+**Step 5 — Verify**
+
+```bash
+stellar contract invoke --id $CONTRACT_ID -- health
+```
+
+### What survives an upgrade
+
+| Data | Storage | Survives upgrade? |
+|------|---------|-------------------|
+| Admin address | Persistent | ✅ Yes |
+| Player / scout profiles | Persistent | ✅ Yes |
+| Validator registry | Persistent | ✅ Yes |
+| Milestone / subscription records | Persistent | ✅ Yes |
+| Initialized flag | Instance | ⚠️ Must re-set if wiped |
+| Paused flag | Instance | ⚠️ Must re-set if wiped |
+| Fee config (scout_access) | Instance | ⚠️ Must re-set |
+| XLM token address (scout_access) | Instance | ⚠️ Must re-set |
+| Progress contract link (verification) | Instance | ⚠️ Must re-wire |
+
+> **Note:** On Stellar, instance storage is **not** automatically wiped during an `upgrade()` call — only the contract code (WASM) is replaced. The table above reflects the risk if the new WASM changes the storage layout or if instance TTL expires. Always re-verify instance state after an upgrade.
+
 ## Common Mistakes
 
 **Milestones approved but player levels don't advance**
-You skipped the cross-contract wiring step. `approve_milestone` calls `advance_level` on the progress contract, but only if the link has been set. Fix it by running:
+You skipped the cross-contract wiring step. `approve_milestone` calls `advance_level` on the progress contract, but only if all links have been set. Fix it by running:
 
 ```bash
 ./scripts/initialize.sh testnet
@@ -118,9 +201,30 @@ You skipped the cross-contract wiring step. `approve_milestone` calls `advance_l
 Or manually:
 
 ```bash
+# 1. Verification → Progress link
 stellar contract invoke --id $VERIFICATION_CONTRACT_ID \
   -- set_progress_contract \
   --progress_contract $PROGRESS_CONTRACT_ID
+
+# 2. Registration ← Progress link
+stellar contract invoke --id $REGISTRATION_CONTRACT_ID \
+  -- set_progress_contract \
+  --addr $PROGRESS_CONTRACT_ID
+
+# 3. Progress → Verification link
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- set_verification_contract \
+  --addr $VERIFICATION_CONTRACT_ID
+
+# 4. Progress → Registration link
+stellar contract invoke --id $PROGRESS_CONTRACT_ID \
+  -- set_registration_contract \
+  --addr $REGISTRATION_CONTRACT_ID
+
+# 5. Scout Access → Progress link
+stellar contract invoke --id $SCOUT_ACCESS_CONTRACT_ID \
+  -- set_progress_contract \
+  --addr $PROGRESS_CONTRACT_ID
 ```
 
 This must be done once after every fresh deployment.
