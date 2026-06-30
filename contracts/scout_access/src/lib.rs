@@ -928,6 +928,7 @@ mod tests {
             pro_sub_stroops: 3_000_000,
             elite_sub_stroops: 7_000_000,
             sub_duration_secs: 30 * 24 * 60 * 60,
+            pro_contact_limit: 10,
         }
     }
 
@@ -1270,6 +1271,8 @@ mod tests {
         let sub = client.get_subscription(&scout);
         assert_eq!(sub.tier, SubscriptionTier::Basic);
     }
+
+    #[test]
     fn test_pause_unpause_events() {
         let (env, admin, _, _, client) = setup();
 
@@ -1706,18 +1709,7 @@ mod tests {
         let contract_balance_after = TokenClient::new(&env, &xlm).balance(&client.address);
         let scout_balance_after = TokenClient::new(&env, &xlm).balance(&scout);
 
-        assert_eq!(
-    contract_balance_before - refund_amount,
-    contract_balance_after
-);
-
-assert_eq!(
-    scout_balance_before + refund_amount,
-    scout_balance_after
-);
-            contract_balance_before - refund_amount,
-            contract_balance_after
-        );
+        assert_eq!(contract_balance_before - refund_amount, contract_balance_after);
         assert_eq!(scout_balance_before + refund_amount, scout_balance_after);
     }
 
@@ -2037,5 +2029,37 @@ assert_eq!(
         );
         assert!(result.is_ok());
         assert_eq!(client.get_trial_count(&player_id), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // #429: pay_to_contact must emit player_contacted event with correct fields
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_pay_to_contact_emits_player_contacted_event_with_correct_fields() {
+        let (env, admin, xlm, contract_id, client) = setup();
+        let scout = Address::generate(&env);
+        mint_token(&env, &xlm, &admin, &scout, 100_000_000);
+
+        client.subscribe(&scout, &SubscriptionTier::Pro);
+
+        // Drain all events accumulated during setup and subscribe.
+        let _ = env.events().all();
+
+        let player_id = 42u64;
+        client.pay_to_contact(&scout, &player_id);
+
+        let events = env.events().all().filter_by_contract(&contract_id);
+        assert_eq!(
+            events,
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    (Symbol::new(&env, "player_contacted"), scout.clone()).into_val(&env),
+                    (player_id, default_fees().contact_fee_stroops).into_val(&env),
+                )
+            ]
+        );
     }
 }
