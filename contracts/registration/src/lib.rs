@@ -173,7 +173,7 @@ impl RegistrationContract {
 
         // Validate vitals string lengths
         if vitals.position.len() > MAX_STRING_LEN
-            || vitals.region.len() > MAX_STRING_LEN
+            || vitals.region.len() > MAX_REGION_LEN
             || vitals.nationality.len() > MAX_STRING_LEN
         {
             return Err(ScoutChainError::InvalidInput);
@@ -1083,7 +1083,8 @@ mod tests {
         client.initialize(&admin);
 
         let wallet = Address::generate(&env);
-        let long = String::from_str(&env, &"A".repeat(65));
+        // 129 bytes — one byte beyond MAX_REGION_LEN (128)
+        let long = String::from_str(&env, &"A".repeat(129));
         let vitals = PlayerVitals {
             age: 20,
             position: String::from_str(&env, "Forward"),
@@ -1092,6 +1093,54 @@ mod tests {
         };
         let hashes = vec![&env, String::from_str(&env, "QmTest")];
         client.register_player(&wallet, &vitals, &hashes);
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #415: MAX_REGION_LEN (128) boundary tests for register_player
+    // -------------------------------------------------------------------------
+
+    /// A 129-byte region string must be rejected with InvalidInput.
+    #[test]
+    fn test_register_player_region_129_bytes_returns_invalid_input() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let region_129 = String::from_str(&env, &"A".repeat(129));
+        let vitals = PlayerVitals {
+            age: 20,
+            position: String::from_str(&env, "Forward"),
+            region: region_129,
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        let result = client.try_register_player(&wallet, &vitals, &hashes);
+        assert_eq!(result, Err(Ok(ScoutChainError::InvalidInput)));
+    }
+
+    /// An exactly 128-byte region string is at the boundary and must succeed.
+    #[test]
+    fn test_register_player_region_128_bytes_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let wallet = Address::generate(&env);
+        let region_128 = String::from_str(&env, &"A".repeat(128));
+        let vitals = PlayerVitals {
+            age: 20,
+            position: String::from_str(&env, "Forward"),
+            region: region_128,
+            nationality: String::from_str(&env, "Ghana"),
+        };
+        let hashes = vec![&env, String::from_str(&env, "QmTest")];
+
+        let player_id = client.register_player(&wallet, &vitals, &hashes);
+        assert_eq!(player_id, 1);
+        let profile = client.get_player(&player_id);
+        assert_eq!(profile.wallet, wallet);
     }
 
     #[test]
