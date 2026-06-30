@@ -1,4 +1,3 @@
-#![no_std]
 // IMPORTANT: Cross-contract wiring required after deployment
 //
 // `approve_milestone` calls `advance_level` on the progress contract to update
@@ -30,8 +29,14 @@ const MAX_CREDENTIALS_LEN: u32 = 256;
 const MIN_CREDENTIALS_LEN: u32 = 10;
 const MAX_GLOBAL_MILESTONE_INDEX: u32 = 500;
 
-const ADMIN_BUMP_LEDGERS: u32 = 10000;
+// Persistent storage TTL bump for milestone records.
+const PERSISTENT_TTL_MIN: u32 = 500;
+const PERSISTENT_TTL_MAX: u32 = 2_000;
 
+// Admin key TTL — kept equal to PERSISTENT_TTL_MAX for simplicity.
+const ADMIN_BUMP_LEDGERS: u32 = 2_000;
+
+// Maximum milestones one validator may approve for a single player.
 const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
 
 /// Maximum number of simultaneously registered validators.
@@ -45,16 +50,6 @@ const ADMIN_BUMP_LEDGERS: u32 = 518400; // ~30 days at 5s/ledger
 const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
 
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-// Persistent storage TTL bump for milestone records and admin key.
-const PERSISTENT_TTL_MIN: u32 = 500;
-const PERSISTENT_TTL_MAX: u32 = 2_000;
-
-// Admin key TTL — kept equal to PERSISTENT_TTL_MAX for simplicity.
-const ADMIN_BUMP_LEDGERS: u32 = 2_000;
-
-// Maximum milestones one validator may approve for a single player.
-const MAX_MILESTONES_PER_PLAYER_PER_VALIDATOR: u32 = 10;
 
 // Generated client for the progress contract — used for cross-contract calls.
 // The progress contract must be deployed and its address registered via
