@@ -252,6 +252,95 @@ impl VerificationContract {
         Ok(())
     }
 
+    /// Transfer a validator's identity to a new wallet address (admin only).
+    ///
+    /// Copies the full `Validator` record (with `wallet` updated to `new_wallet`)
+    /// to `DataKey::Validator(new_wallet)`, migrates the `ValidatorMilestoneCount`
+    /// counter, removes the old storage keys, and replaces `old_wallet` with
+    /// `new_wallet` in `ValidatorVector` (closes #476).
+    ///
+    /// Returns `ValidatorNotFound` if `old_wallet` is not registered.
+    /// Returns `ValidatorAlreadyRegistered` if `new_wallet` is already in the registry.
+    pub fn transfer_validator(
+        env: Env,
+        old_wallet: Address,
+        new_wallet: Address,
+    ) -> Result<(), VerificationError> {
+        Self::require_admin(&env)?;
+
+        // Ensure old wallet is registered
+        let old_validator: Validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(old_wallet.clone()))
+            .ok_or(VerificationError::ValidatorNotFound)?;
+
+        // Ensure new wallet is not already registered
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Validator(new_wallet.clone()))
+        {
+            return Err(VerificationError::ValidatorAlreadyRegistered);
+        }
+
+        // Copy the record with updated wallet field
+        let new_validator = Validator {
+            wallet: new_wallet.clone(),
+            credentials: old_validator.credentials.clone(),
+            registered_at: old_validator.registered_at,
+            active: old_validator.active,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Validator(new_wallet.clone()), &new_validator);
+
+        // Migrate ValidatorMilestoneCount to new wallet
+        let old_count_key = DataKey::ValidatorMilestoneCount(old_wallet.clone());
+        let new_count_key = DataKey::ValidatorMilestoneCount(new_wallet.clone());
+        let milestone_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&old_count_key)
+            .unwrap_or(0u32);
+        if milestone_count > 0 {
+            env.storage()
+                .persistent()
+                .set(&new_count_key, &milestone_count);
+        }
+
+        // Remove old wallet keys
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Validator(old_wallet.clone()));
+        env.storage().persistent().remove(&old_count_key);
+
+        // Replace old_wallet with new_wallet in ValidatorVector
+        let mut validator_vector: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ValidatorVector)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Find index of old_wallet and replace it
+        let mut found_idx: Option<u32> = None;
+        for i in 0..validator_vector.len() {
+            if validator_vector.get(i).unwrap() == old_wallet {
+                found_idx = Some(i);
+                break;
+            }
+        }
+        if let Some(idx) = found_idx {
+            validator_vector.set(idx, new_wallet.clone());
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ValidatorVector, &validator_vector);
+
+        events::validator_transferred(&env, &old_wallet, &new_wallet);
+        Ok(())
+    }
+
     pub fn pause_contract(env: Env) -> Result<(), VerificationError> {
         Self::require_admin(&env)?;
         let admin: Address = env
@@ -1537,5 +1626,129 @@ mod tests {
 
         // Milestone count must be unchanged after restore
         assert_eq!(client.get_validator_milestone_count(&validator), count_before);
+    }
+
+    // -------------------------------------------------------------------------
+    // #476: transfer_validator
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_transfer_validator_record_available_under_new_wallet() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let old_wallet = Address::generate(&env);
+        let new_wallet = Address::generate(&env);
+        let credentials = String::from_str(&env, "UEFA B License");
+
+        client.register_validator(&old_wallet, &credentials);
+        client.transfer_validator(&old_wallet, &new_wallet);
+
+        // New wallet must be an active validator
+        assert!(client.is_active_validator(&new_wallet));
+        // Credentials must be preserved
+        let transferred = client.get_validator(&new_wallet);
+        assert_eq!(transferred.credentials, credentials);
+        assert_eq!(transferred.wallet, new_wallet);
+    }
+
+    #[test]
+    fn test_transfer_validator_removes_old_wallet() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let old_wallet = Address::generate(&env);
+        let new_wallet = Address::generate(&env);
+        client.register_validator(&old_wallet, &String::from_str(&env, "Coach"));
+
+        client.transfer_validator(&old_wallet, &new_wallet);
+
+        // Old wallet must no longer be a validator
+        assert!(!client.is_active_validator(&old_wallet));
+        let result = client.try_get_validator(&old_wallet);
+        assert_eq!(result, Err(Ok(VerificationError::ValidatorNotFound)));
+    }
+
+    #[test]
+    fn test_transfer_validator_updates_validator_vector() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let old_wallet = Address::generate(&env);
+        let new_wallet = Address::generate(&env);
+        client.register_validator(&old_wallet, &String::from_str(&env, "Coach"));
+
+        client.transfer_validator(&old_wallet, &new_wallet);
+
+        let validators = client.get_validators();
+        let has_new = validators.contains(&new_wallet);
+        let has_old = validators.contains(&old_wallet);
+        assert!(has_new, "new_wallet must be in ValidatorVector after transfer");
+        assert!(!has_old, "old_wallet must not be in ValidatorVector after transfer");
+    }
+
+    #[test]
+    fn test_transfer_validator_migrates_milestone_count() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let old_wallet = Address::generate(&env);
+        let new_wallet = Address::generate(&env);
+        client.register_validator(&old_wallet, &String::from_str(&env, "Coach"));
+
+        // Approve two milestones under old wallet
+        client.approve_milestone(
+            &old_wallet,
+            &1u64,
+            &String::from_str(&env, "Milestone A"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        client.approve_milestone(
+            &old_wallet,
+            &2u64,
+            &String::from_str(&env, "Milestone B"),
+            &String::from_str(&env, VALID_CID_V0),
+        );
+        let count_before = client.get_validator_milestone_count(&old_wallet);
+        assert_eq!(count_before, 2);
+
+        client.transfer_validator(&old_wallet, &new_wallet);
+
+        // New wallet must inherit the milestone count
+        assert_eq!(client.get_validator_milestone_count(&new_wallet), count_before);
+        // Old wallet count must be gone (returns 0)
+        assert_eq!(client.get_validator_milestone_count(&old_wallet), 0);
+    }
+
+    #[test]
+    fn test_transfer_validator_old_wallet_not_found_returns_error() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let unknown = Address::generate(&env);
+        let new_wallet = Address::generate(&env);
+        let result = client.try_transfer_validator(&unknown, &new_wallet);
+        assert_eq!(result, Err(Ok(VerificationError::ValidatorNotFound)));
+    }
+
+    #[test]
+    fn test_transfer_validator_new_wallet_already_registered_returns_error() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let old_wallet = Address::generate(&env);
+        let new_wallet = Address::generate(&env);
+        client.register_validator(&old_wallet, &String::from_str(&env, "Coach A"));
+        client.register_validator(&new_wallet, &String::from_str(&env, "Coach B"));
+
+        // Both are registered — transfer must fail
+        let result = client.try_transfer_validator(&old_wallet, &new_wallet);
+        assert_eq!(result, Err(Ok(VerificationError::ValidatorAlreadyRegistered)));
     }
 }
