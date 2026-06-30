@@ -1390,6 +1390,8 @@ mod tests {
         let sub = client.get_subscription(&scout);
         assert_eq!(sub.tier, SubscriptionTier::Basic);
     }
+
+    #[test]
     fn test_pause_unpause_events() {
         let (env, admin, _, _, client) = setup();
 
