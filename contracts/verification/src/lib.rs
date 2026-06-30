@@ -384,6 +384,10 @@ impl VerificationContract {
         Self::require_not_paused(&env)?;
         validator_wallet.require_auth();
 
+        if description.len() > MAX_DESCRIPTION_LEN as usize {
+            return Err(VerificationError::InvalidInput);
+        }
+
         validate_cid(&evidence_hash).map_err(|_| VerificationError::InvalidInput)?;
 
         // Verify the caller is an active validator
